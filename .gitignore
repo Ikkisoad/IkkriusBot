@@ -33,11 +33,16 @@ starcraftfull
 *.ilk
 *.ERR
 bin/StarterBot_d.exe
-bin/StarterBot_d.exe
 bin/ReplayData.txt
 bin/ReplayParser.exe
 bin/RunReplayParserAndStarcraft.bat
 bin/replaydata
+# Runtime-generated data files
+bin/genetic_build_log.csv
+bin/genetic_build_log.txt
+bin/best_build_orders.txt
+bin/game_stats.csv
+src/starterbot/stats/data/*.csv
 # Linux
 bin_linux/src
 !libgcc_s_dw2-1.dll

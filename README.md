@@ -1,32 +1,133 @@
-# STARTcraft
+# IkkriusBot
 
-Get started with Starcraft: BroodWar AI Development as fast as possible.
+A **StarCraft: Brood War** Zerg AI bot built with [BWAPI 4.4.0](https://bwapi.github.io/). IkkriusBot plays aggressive Zerg early-game strategies against any opponent, tracks match statistics per opponent/map/strategy, and includes a self-tuning Genetic build-order engine.
 
-New to StarCraft or AI Programming? Watch the tutorial video(s):
-* Starcraft AI Intro: https://www.youtube.com/watch?v=czhNqUxmLks
-* STARTcraft Tutorial: https://www.youtube.com/watch?v=FEEkO6__GKw
+> Forked from [STARTcraft](https://github.com/davechurchill/STARTcraft) — the BWAPI C++ starter template.
 
-Currently Supported (more coming soon):
-* Windows / C++ Development using BWAPI
+---
 
-# Setup Instructions:
+## Features
 
-## Windows / C++
+- **Multiple build orders** — 4-Pool, 5-Pool, 6-Pool, 7-Pool, 8-Pool, Overpool, and Genetic (adaptive)
+- **Micromanagement system** — Aggressive, Defensive, and Neutral modes with smart attack, kite, flee, and scouting routines
+- **Base tracking** — BWEM-powered map analysis, expansion finding, and enemy base detection
+- **Match statistics** — Win-rate logging per opponent × race × map × strategy, used to pick the best strategy next game
+- **Replay parser** — Basic replay analysis mode
+- **Debug overlay** — Toggleable on-screen display of unit health, commands, bounding boxes, and map data
 
-STARTcraft comes with a StarterBot written in C++ using BWAPI 4.4.0. This repo comes with BWAPI, and uses Injectory to launch StarCraft with BWAPI, so Chaoslauncher is not required.
+---
 
-1. Download / Clone this repo to your computer
-2. Download and unzip [Starcraft Broodwar 1.16.1](https://www.cs.mun.ca/~dchurchill/starcraftaicomp/files/startcraft/scbw_bwapi440.zip) to the included `starcraft` folder
-3. Run `bin/RunStarterBotAndStarcraft.bat` which will launch the bot executable and Starcraft / BWAPI
-4. Open `visualstudio/STARTcraft.sln` in Visual Studio 2022 to modify / recompile the code
+## Requirements
 
-## Linux / C++
+- StarCraft: Brood War **1.16.1**
+- **Windows**: Visual Studio 2022 (for building)
+- **Linux**: `mingw-w64` + `wine` (cross-compiles a Windows `.exe` run under Wine)
 
-1. Download / Clone this repo to your computer
-2. Download and unzip [Starcraft Broodwar 1.16.1](https://www.cs.mun.ca/~dchurchill/starcraftaicomp/files/startcraft/scbw_bwapi440.zip) to the included `starcraft` folder
-3. Install Mingw-w64 using: `sudo apt install build-essential mingw-w64`
-4. Install wine using: `sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install wine`. You can skip this step if you use [WINE_AppImage](https://github.com/mmtrt/WINE_AppImage) or something similar, but in this case you should modify `WINEPREFIX` and the path to wine in `bin_linux/RunStarterBotAndStarcraft.sh`.
-5. Run `bash bin_linux/RunStarterBotAndStarcraft.sh` which will launch the bot executable and Starcraft / BWAPI
-6. Modify the code in any preferred editor / recompile the code using: `make`
+---
 
-Note. In the `bin_linux` folder, the `libgcc_s_dw2-1.dll` and `libstdc++-6.dll` files are exactly the same ones you will find in `/usr/lib/gcc/i686-w64-mingw32/12-win32` after installing Mingw-w64.
+## Setup
+
+### 1. Get the StarCraft files
+
+Download and unzip [Starcraft Broodwar 1.16.1 + BWAPI 4.4.0](https://www.cs.mun.ca/~dchurchill/starcraftaicomp/files/startcraft/scbw_bwapi440.zip) into the `starcraft/` folder at the repo root.
+
+### 2. Build the bot
+
+**Windows (Visual Studio 2022)**
+
+Open `visualstudio/IkkriusBot.sln` and build the `StarterBot` project (Release or Debug). The output `.exe` is placed in `bin/`.
+
+**Linux (cross-compile)**
+
+```bash
+sudo apt install build-essential mingw-w64
+sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install wine
+make
+```
+
+### 3. Run
+
+```bat
+bin\RunStarterBotAndStarcraft.bat
+```
+
+This launches `StarterBot.exe` and then starts StarCraft with BWAPI injected. No Chaoslauncher required.
+
+---
+
+## In-Game Controls
+
+These text commands can be typed in-game while the bot is running (requires `UserInput` flag, enabled by default):
+
+| Key | Action |
+|-----|--------|
+| `m` | Toggle map debug overlay |
+| `a` | Force all combat units to attack |
+| `s` | Switch micro mode to Neutral |
+| `1` | Set game speed to maximum (speed 0) |
+| `2` | Set game speed to fast (speed 8) |
+| `3` | Set game speed to normal (speed 32) |
+| `4` | Set game speed to slow (speed 128) |
+
+---
+
+## Project Structure
+
+```
+IkkriusBot/
+├── bin/                        # Compiled executables and launch scripts
+├── bin_linux/                  # Linux cross-compile output
+├── BWEM/                       # BWEM library (map analysis)
+├── src/
+│   ├── bwapi/                  # BWAPI headers and client libraries
+│   └── starterbot/
+│       ├── main.cpp            # Entry point — BWAPI event loop
+│       ├── StarterBot.h/.cpp   # Top-level bot class
+│       ├── Tools.h/.cpp        # General BWAPI utility helpers
+│       ├── MapTools.h/.cpp     # Tile walkability / buildability grids
+│       ├── micro.h/.cpp        # Micromanagement routines
+│       ├── Units.h/.cpp        # Unit tracking helpers
+│       ├── ReplayParser.h/.cpp # Replay mode handler
+│       ├── Grid.hpp            # Generic 2D grid template
+│       ├── Factory/
+│       │   └── BuildOrderFactory.h  # Factory that instantiates build orders
+│       ├── buildorders/        # Concrete build order implementations
+│       │   ├── 4Pool – 8Pool   # Zergling rush variants
+│       │   ├── Overpool        # Safe expand-into-pool opener
+│       │   ├── Genetic         # Adaptive/self-tuning build order
+│       │   └── BuildOrderTools # Shared helpers for build orders
+│       └── stats/              # Win-rate statistics
+│           ├── stats.h/.cpp
+│           └── data/           # Runtime CSV data (gitignored)
+├── visualstudio/               # Visual Studio project files + shared source
+│   ├── IkkriusBot.sln
+│   ├── BasesTools.h/.cpp       # Base position tracking (BWEM integration)
+│   └── src/starterbot/
+│       └── BuildOrder.h        # Abstract base class for all build orders
+└── starcraft/                  # StarCraft game files (gitignored)
+```
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a full module dependency diagram.
+
+---
+
+## Adding a New Build Order
+
+See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for a step-by-step guide.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System architecture and module dependency diagram |
+| [`docs/BUILD_ORDERS.md`](docs/BUILD_ORDERS.md) | Detailed breakdown of every build order strategy |
+| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | How to add features, coding conventions, and project rules |
+| [`RULES.md`](RULES.md) | Quick-reference rules for AI-assisted development |
+
+---
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
