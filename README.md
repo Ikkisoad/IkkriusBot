@@ -29,7 +29,7 @@ A **StarCraft: Brood War** Zerg AI bot built with [BWAPI 4.4.0](https://bwapi.gi
 
 ### 1. Get the StarCraft files
 
-Download and unzip [Starcraft Broodwar 1.16.1 + BWAPI 4.4.0](https://www.cs.mun.ca/~dchurchill/starcraftaicomp/files/startcraft/scbw_bwapi440.zip) into the `starcraft/` folder at the repo root.
+Download and unzip [Starcraft Broodwar 1.16.1 + BWAPI 4.4.0](https://davechurchill.ca/starcraft/resources/) into the `starcraft/` folder at the repo root.
 
 ### 2. Build the bot
 

@@ -41,7 +41,7 @@ void StarterBot::onStart()
     mineralsFrame = 0;
     // Select the build order type you want to use
     BuildOrderType selectedBuildOrder = static_cast<BuildOrderType>(x);
-    currentBuildOrder = BuildOrderFactory::Create(BuildOrderType::Overpool);
+    currentBuildOrder = BuildOrderFactory::Create(BuildOrderType::HiveTech);
     BWAPI::Broodwar->printf("Strategy selected: %s", currentBuildOrder->GetName());
     std::cout << "Using strategy " << currentBuildOrder->GetName() << "\n";
 

@@ -850,3 +850,221 @@ void Micro::Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal) {
     BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Fleeing");
     return;
 }
+void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits) {
+    BWAPI::Unitset mutalisks;
+    BWAPI::Unitset guardians;
+    BWAPI::Unitset devourers;
+    BWAPI::Unitset queens;
+    BWAPI::Unitset defaultUnits;
+
+    for (auto& unit : myUnits) {
+        if (!unit->isCompleted() || unit->isLoaded() || unit->isBurrowed() || unit->isMorphing()) continue;
+
+        auto type = unit->getType();
+        if (type == BWAPI::UnitTypes::Zerg_Mutalisk) {
+            mutalisks.insert(unit);
+        } else if (type == BWAPI::UnitTypes::Zerg_Guardian) {
+            guardians.insert(unit);
+        } else if (type == BWAPI::UnitTypes::Zerg_Devourer) {
+            devourers.insert(unit);
+        } else if (type == BWAPI::UnitTypes::Zerg_Queen) {
+            queens.insert(unit);
+        } else {
+            defaultUnits.insert(unit);
+        }
+    }
+
+    // Call default micro on normal units
+    BasicAttackAndScoutLoop(defaultUnits);
+
+    // Calculate a target base for harss/assault
+    BWAPI::Position targetPos = BasesTools::GetEnemyBasePosition();
+    if (targetPos == BWAPI::Positions::None) {
+        // Just look for some enemy
+        for (auto enemy : BWAPI::Broodwar->enemy()->getUnits()) {
+            if (enemy->getType().isBuilding()) {
+                targetPos = enemy->getPosition();
+                break;
+            }
+        }
+        if (targetPos == BWAPI::Positions::None) {
+            targetPos = BWAPI::Position(BWAPI::Broodwar->mapWidth()*16, BWAPI::Broodwar->mapHeight()*16);
+        }
+    }
+
+    // Harass loops
+    for (auto muta : mutalisks) {
+        MutaliskHarassLoop(muta, BWAPI::Broodwar->enemy()->getUnits());
+    }
+
+    for (auto guardian : guardians) {
+        GuardianAssaultLoop(guardian, BWAPI::Broodwar->enemy()->getUnits());
+    }
+
+    // Devourers escort guardians or mutalisks
+    for (auto devourer : devourers) {
+        BWAPI::Unit targetToEscort = nullptr;
+        if (!guardians.empty()) {
+            targetToEscort = *guardians.begin();
+        } else if (!mutalisks.empty()) {
+            targetToEscort = *mutalisks.begin();
+        }
+
+        if (targetToEscort) {
+            SmartMove(devourer, targetToEscort->getPosition());
+            // Attack nearby air threats if any
+            auto enemies = devourer->getUnitsInRadius(devourer->getType().airWeapon().maxRange() + 32, BWAPI::Filter::IsEnemy);
+            BWAPI::Unit bestTarget = nullptr;
+            for (auto e : enemies) {
+                if (e->getType().isFlyer()) {
+                    bestTarget = e;
+                    break;
+                }
+            }
+            if (bestTarget) {
+                SmartAttackUnit(devourer, bestTarget);
+            }
+        } else {
+            SmartMove(devourer, targetPos);
+        }
+    }
+
+    // Queens use spells
+    for (auto queen : queens) {
+        QueenCastLoop(queen, BWAPI::Broodwar->enemy()->getUnits());
+        // Follow army
+        if (!guardians.empty()) {
+            SmartMove(queen, (*guardians.begin())->getPosition());
+        } else if (!mutalisks.empty()) {
+            SmartMove(queen, (*mutalisks.begin())->getPosition());
+        }
+    }
+}
+
+void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
+    if (!muta) return;
+
+    // Mutalisks use airWeapon for everything
+    int range = muta->getType().airWeapon().maxRange();
+    
+    // Find threats and targets
+    auto nearbyEnemies = muta->getUnitsInRadius(range + 128, BWAPI::Filter::IsEnemy);
+    
+    BWAPI::Unit bestTarget = nullptr;
+    BWAPI::Unit worstThreat = nullptr;
+    int minThreatDist = 99999;
+
+    for (auto enemy : nearbyEnemies) {
+        // Threat analysis
+        BWAPI::WeaponType w = enemy->getType().airWeapon();
+        if (w != BWAPI::WeaponTypes::None) {
+            int dist = muta->getDistance(enemy);
+            if (dist < minThreatDist && dist <= w.maxRange() + 64) {
+                minThreatDist = dist;
+                worstThreat = enemy;
+            }
+        }
+
+        // Target priority (Workers > AntiAir > Buildings)
+        if (!bestTarget) {
+            bestTarget = enemy;
+        } else if (enemy->getType().isWorker() && !bestTarget->getType().isWorker()) {
+            bestTarget = enemy;
+        }
+    }
+
+    if (worstThreat && muta->getGroundWeaponCooldown() > 0) {
+        // Kite away
+        BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Kiting!");
+        Flee(muta, worstThreat);
+    } else if (bestTarget && muta->getGroundWeaponCooldown() == 0) {
+        BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Attacking!");
+        SmartAttackUnit(muta, bestTarget);
+    } else {
+        // Move towards enemy base
+        BWAPI::Position targetPos = BasesTools::GetEnemyBasePosition();
+        if (targetPos != BWAPI::Positions::None) {
+            BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Moving to enemy");
+            SmartMove(muta, targetPos);
+        } else {
+            BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Scouting");
+            ScoutAndWander(muta);
+        }
+    }
+}
+
+void Micro::GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies) {
+    if (!guardian) return;
+
+    auto nearbyEnemies = guardian->getUnitsInRadius(guardian->getType().groundWeapon().maxRange() + 64, BWAPI::Filter::IsEnemy && !BWAPI::Filter::IsFlyer);
+    
+    if (!nearbyEnemies.empty()) {
+        BWAPI::Unit bestTarget = nullptr;
+        // Prioritize static D and scary units
+        for (auto enemy : nearbyEnemies) {
+            if (!bestTarget) {
+                bestTarget = enemy;
+            } else if (enemy->getType().groundWeapon().maxRange() > 0 && bestTarget->getType().groundWeapon().maxRange() == 0) {
+                bestTarget = enemy;
+            }
+        }
+        if (guardian->getGroundWeaponCooldown() == 0) {
+             BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Sieging");
+             SmartAttackUnit(guardian, bestTarget);
+        } else if (bestTarget) {
+             // Guardians are slow, but try to kite slightly if possible
+             int enemyRange = bestTarget->getType().airWeapon().maxRange();
+             if (enemyRange > 0 && guardian->getDistance(bestTarget) <= enemyRange) {
+                 BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Kiting");
+                 Flee(guardian, bestTarget);
+             }
+        }
+    } else {
+        BWAPI::Position targetPos = BasesTools::GetEnemyBasePosition();
+        if (targetPos != BWAPI::Positions::None) {
+            BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Assaulting base");
+            SmartMove(guardian, targetPos);
+        } else {
+             BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Scouting");
+             ScoutAndWander(guardian);
+        }
+    }
+}
+
+void Micro::QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies) {
+    if (!queen) return;
+
+    auto nearbyEnemies = queen->getUnitsInRadius(10 * 32, BWAPI::Filter::IsEnemy); // ~Sight range
+    
+    for (auto enemy : nearbyEnemies) {
+        // Spawn Broodlings on Tanks/Ultras
+        if (queen->getEnergy() >= 150 && BWAPI::Broodwar->self()->hasResearched(BWAPI::TechTypes::Spawn_Broodlings)) {
+            if (enemy->getType() == BWAPI::UnitTypes::Terran_Siege_Tank_Tank_Mode || 
+                enemy->getType() == BWAPI::UnitTypes::Terran_Siege_Tank_Siege_Mode ||
+                enemy->getType() == BWAPI::UnitTypes::Protoss_High_Templar ||
+                enemy->getType() == BWAPI::UnitTypes::Zerg_Ultralisk ||
+                enemy->getType() == BWAPI::UnitTypes::Zerg_Defiler) 
+            {
+                queen->useTech(BWAPI::TechTypes::Spawn_Broodlings, enemy);
+                return;
+            }
+        }
+
+        // Ensnare clumps of bio/mutas
+        if (queen->getEnergy() >= 75 && BWAPI::Broodwar->self()->hasResearched(BWAPI::TechTypes::Ensnare)) {
+            // Very simple: just ensnare the first enemy unit we see that is scary
+            if (enemy->getType().canAttack() && !enemy->getType().isBuilding()) {
+                queen->useTech(BWAPI::TechTypes::Ensnare, enemy->getPosition());
+                return;
+            }
+        }
+
+        // Parasite for scouting
+        if (queen->getEnergy() >= 75) {
+            if (!enemy->getType().isBuilding() && !enemy->isParasited() && enemy->getType().maxHitPoints() > 100) {
+                queen->useTech(BWAPI::TechTypes::Parasite, enemy);
+                return;
+            }
+        }
+    }
+}

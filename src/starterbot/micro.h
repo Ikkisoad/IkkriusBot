@@ -30,4 +30,10 @@ namespace Micro
     void BasicAttackAndScoutLoop(BWAPI::Unitset myUnits);
     void Retreat(BWAPI::Unit unit);
     void Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal);
+    
+    // HiveTech Micro
+    void HiveTechMicroLoop(BWAPI::Unitset myUnits);
+    void MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies);
+    void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies);
+    void QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies);
 }
