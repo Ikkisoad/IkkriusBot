@@ -35,7 +35,7 @@ Download and unzip [Starcraft Broodwar 1.16.1 + BWAPI 4.4.0](https://davechurchi
 
 **Windows (Visual Studio 2022)**
 
-Open `visualstudio/IkkriusBot.sln` and build the `StarterBot` project (Release or Debug). The output `.exe` is placed in `bin/`.
+Open `visualstudio/IkkriusBot.sln` and build the `StarterBot` project in **Release | Win32**. The launcher uses the resulting `bin/IkkriusBot.exe`. Debug builds produce `bin/IkkriusBot_d.exe`.
 
 **Linux (cross-compile)**
 
@@ -51,7 +51,27 @@ make
 bin\RunStarterBotAndStarcraft.bat
 ```
 
-This launches `StarterBot.exe` and then starts StarCraft with BWAPI injected. No Chaoslauncher required.
+This launches `IkkriusBot.exe` and then starts StarCraft with BWAPI injected. No Chaoslauncher required. The launcher works from any working directory and checks the required files before starting either program.
+
+If it reports missing files, extract the **StarCraft + BWAPI 4.4.0 bundle** linked above directly into `starcraft/`. A plain StarCraft 1.16.1 installation is not enough: `RunStarcraftWithBWAPI.bat`, `injectory_x86.exe`, `WMode.dll`, and `bwapi-data/` must be present alongside `StarCraft.exe`.
+
+---
+
+### Automatic matches
+
+BWAPI handles map selection and match startup. In `starcraft/bwapi-data/bwapi.ini`, set the existing keys under `[auto_menu]` to:
+
+```ini
+auto_menu = SINGLE_PLAYER
+race = Zerg
+map = maps/BroodWar/aiide/(?)*.sc?
+mapiteration = RANDOM
+enemy_count = 1
+enemy_race = Random
+auto_restart = ON
+```
+
+This starts a random bundled AIIDE map as Zerg against one computer opponent and starts another match when the game ends. Restart StarCraft after changing these settings. The downloaded bundle defaults to `auto_menu = OFF`, so configure this after a fresh extraction; the local `starcraft/` folder is gitignored.
 
 ---
 
@@ -131,3 +151,99 @@ See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for a step-by-step guide.
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+
+## Match diagnostics and pressure build
+
+The ground HiveTech strategy fields Hydras before Lair, researches Lurkers after
+establishing its ranged army, and delays Hive until the economy can support it.
+It adds gas at developed bases, Sunken defenses, Hydra range/speed and ground upgrades.
+The army attacks once formed, returns to defend threatened bases, and regroups after
+heavy losses. Match results are still needed to tune these heuristics.
+
+Every match automatically writes `bin/logs/match-*.jsonl`, including when running
+`bin/updated/IkkriusBot.exe`. On Windows the path is independent of the working directory.
+Logs identify the build revision, map and opponent. Snapshots every 120 game frames
+record resources and reserves, supply, workers, larvae, army, visible enemies, phase
+and decision. Events record unit losses, production outcomes, attacks/regroups and
+win/loss. Identical command outcomes are sampled once per 120 frames, so counts are
+samples rather than exact failed-command totals. Records flush immediately; interrupted
+matches are distinguished from losses.
+
+From the repository root, summarize one match or the entire log directory:
+
+```powershell
+python tools/analyze_match.py
+python tools/analyze_match.py bin/logs/match-<id>.jsonl
+```
+
+The summary includes floating resources, estimated supply-block duration, losses,
+production errors and the last state. Raw supply values use BWAPI's doubled units;
+summary army supply uses normal game units. Logs remain local and are gitignored.
+Delete old logs manually when no longer needed.
+
+The normal launcher installs `bin/updated/IkkriusBot.exe` if it is newer than the
+installed executable. Close the old bot before restarting the launcher. An already
+running bot cannot acquire the new code or logging.
+
+Run focused checks in a Visual Studio developer PowerShell:
+
+```powershell
+python tests/production_regression.py
+python tests/defense_regression.py
+python tests/micro_regression.py
+python tests/logging_regression.py
+python tests/queen_air_regression.py
+```
+
+The build also adds macro Hatcheries when larvae limit production and lowers gas staffing
+when gas is oversupplied. Resources committed to a walking builder are reserved centrally,
+so unit production cannot consume a queued building's construction cost.
+For a bounded automated run, `IkkriusBot.exe --once` exits after one completed match.
+
+Live validation on September 24, 2026 found a queued-building resource bug in an initial
+loss on Python. After the reservation fix, the bot won a test against a Terran computer
+on Heartbreak Ridge. This is evidence of a working build, not a general win-rate claim;
+continue comparing the per-match logs across opponents and maps.
+
+## Queen support and air strategy
+
+Normal matches now select **MutaHive 70%** of the time and **HiveTech 30%**.
+The strategies retain separate statistics keys. MutaHive takes the direct Lair/Spire
+path, prioritizes Mutalisks, adds Queens, then commits to Hive at eight Mutalisks and
+24 Drones on at least two Hatcheries. Greater Spire morphs produce Guardians for ground
+siege and Devourers for air cover. The morph policy preserves at least eight completed
+Mutalisks, normally fields one Devourer escort, and increases Devourers for visible
+combat aircraft. Idle, healthy Mutalisks morph one at a time, with resources reserved
+before spending on more production. Air attack and armor upgrades are included.
+
+HiveTech groups nearby Hydras into squads of up to 12 and requests one Queen per squad.
+It replaces lost Queens and holds supply for missing support. A detached Hydra group
+also requests its own Queen. Queens catch up behind their assigned groups and cast
+Ensnare on clusters of at least three unensnared combat units, or Spawn Broodlings on
+valuable valid ground targets. Nearby Queens avoid duplicate casts. Parasite uses only
+surplus energy. Support is a production target: groups can temporarily lack a Queen
+while rebuilding losses or waiting for tech/resources.
+
+Lurkers follow nearby Hydra groups, burrow to engage ground targets, hold deployment
+through short gaps in contact and weapon cooldowns, then unburrow to rejoin the advance.
+The Hive army scales Lurker production with Hydra count, up to 12.
+
+To force either strategy for a reproducible test, launch from PowerShell in the repo:
+
+```powershell
+$env:IKKRIUS_STRATEGY = 'MutaHive' # or 'HiveTech'
+.\bin\RunStarterBotAndStarcraft.bat
+```
+
+Remove that environment variable to return to weighted selection. The log summary now
+includes accepted Queen spells, Hydra-group support, Lurker deployments and air morphs.
+The `queen-air-v4` revision identifies this behavior; prior ground-build wins do not
+validate the new air strategy.
+
+### Surplus economy and pressure waves
+
+HiveTech and MutaHive count mining sites separately from macro Hatcheries. With no base threats, at least 24 Drones, 16 army supply, and 1,200 minerals after reservations, they can expand beyond the normal four-site limit, one construction order at a time. Visible enemy attackers near a candidate expansion make that site ineligible.
+
+At 195+ supply with a 200-supply capacity, 1,500 unreserved minerals, available larvae and working production, the bot can commit up to 20 supply (at most a quarter of the army) to a sustained attack. Zerglings come first, then Hydras and surplus Mutalisks. Replacement costs must fit the mineral and gas budgets; eight Mutalisks and all Queens, Lurkers, Guardians, Devourers, workers and Overlords are excluded. Selected attackers keep fighting instead of retreating or waiting for the army to regroup. Queens retain their spell and escort behavior.
+
+Waves stop for base threats, low supply, insufficient replacement funds, lost production, or depletion of the selected attackers. New replacements are not automatically added to a running wave. Match logs record `surplus_expansion`, `pressure_start`, and `pressure_end`; `tools/analyze_match.py` summarizes them. Revision: `surplus-pressure-v5`.

@@ -1,5 +1,6 @@
 #include "StarterBot.h"
 #include "Tools.h"
+#include "MatchLog.h"
 #include "MapTools.h"
 #include "buildorders/4Pool.h"
 #include "../../visualstudio/BasesTools.h"
@@ -8,6 +9,7 @@
 #include "micro.h"
 #include "stats/stats.h"
 #include <random>
+#include <cstdlib>
 
 StarterBot::StarterBot()
 {
@@ -32,17 +34,18 @@ void StarterBot::onStart()
             oponentRace = player->getRace().getName();
         }
     }
-    auto strategy = Stats::readStrategy(oponentName, oponentRace, BWAPI::Broodwar->mapHash());
-
     static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> distX(0, sizeof(BuildOrderType));
-    int x = distX(rng);
+    std::bernoulli_distribution preferAir(0.70);
+    auto selectedBuildOrder = preferAir(rng) ? BuildOrderType::MutaHive : BuildOrderType::HiveTech;
+    // An explicit override makes both builds reproducible for match diagnostics.
+    if (const char* requested = std::getenv("IKKRIUS_STRATEGY")) {
+        if (std::string(requested) == "MutaHive") selectedBuildOrder = BuildOrderType::MutaHive;
+        else if (std::string(requested) == "HiveTech") selectedBuildOrder = BuildOrderType::HiveTech;
+    }
     BasesTools::Initialize();
     mineralsFrame = 0;
-    // Select the build order type you want to use
-    BuildOrderType selectedBuildOrder = static_cast<BuildOrderType>(x);
-    currentBuildOrder = BuildOrderFactory::Create(BuildOrderType::HiveTech);
-    BWAPI::Broodwar->printf("Strategy selected: %s", currentBuildOrder->GetName());
+    currentBuildOrder = BuildOrderFactory::Create(selectedBuildOrder);
+    BWAPI::Broodwar->printf("Strategy selected: %s", currentBuildOrder->GetName().c_str());
     std::cout << "Using strategy " << currentBuildOrder->GetName() << "\n";
 
     // Set our BWAPI options here    
@@ -56,13 +59,14 @@ void StarterBot::onStart()
     m_mapTools.onStart();
     BasesTools::FindExpansions();
 
+    MatchLog::Start(currentBuildOrder->GetName());
     currentBuildOrder->onStart();
 }
 
 // Called on each frame of the game
 void StarterBot::onFrame()
 {
-    if (BWAPI::BWAPI_isDebug) {
+    if (BWAPI::BWAPI_isDebug()) {
         BasesTools::DrawEnemyBases(BWAPI::Colors::Orange);
         BasesTools::DrawAllBases(BWAPI::Colors::Yellow);
         Tools::DrawUnitHealthBars();
@@ -94,6 +98,7 @@ bool StarterBot::trainUnit(BWAPI::UnitType unit) {
 // Build more supply if we are going to run out soon
 void StarterBot::buildAdditionalSupply()
 {
+    if (BWAPI::Broodwar->self()->supplyTotal() >= 400) return;
     // Get the amount of supply supply we currently have unused
     const int unusedSupply = Tools::GetTotalSupply(true) - BWAPI::Broodwar->self()->supplyUsed();
 
@@ -129,6 +134,7 @@ void StarterBot::onEnd(bool isWinner)
             oponentRace = player->getRace().getName();
         }
     }
+    MatchLog::End(isWinner ? "win" : "loss");
     currentBuildOrder->onEnd(isWinner);
     std::cout << "We " << (isWinner ? "won!" : "lost!") << "\n";
     Stats::updateWinRateFile(oponentName, oponentRace, BWAPI::Broodwar->mapHash(), currentBuildOrder->GetName(), isWinner);
@@ -137,6 +143,7 @@ void StarterBot::onEnd(bool isWinner)
 // Called whenever a unit is destroyed, with a pointer to the unit
 void StarterBot::onUnitDestroy(BWAPI::Unit unit)
 {
+    MatchLog::UnitEvent("destroy", unit);
     currentBuildOrder->onUnitDestroy(unit);
 }
 
@@ -144,6 +151,7 @@ void StarterBot::onUnitDestroy(BWAPI::Unit unit)
 // Zerg units morph when they turn into other units
 void StarterBot::onUnitMorph(BWAPI::Unit unit)
 {
+    MatchLog::UnitEvent("morph", unit);
     currentBuildOrder->onUnitMorph(unit);
 }
 
@@ -224,6 +232,7 @@ void StarterBot::onUnitCreate(BWAPI::Unit unit)
 // Called whenever a unit finished construction, with a pointer to the unit
 void StarterBot::onUnitComplete(BWAPI::Unit unit)
 {
+    MatchLog::UnitEvent("complete", unit);
 	currentBuildOrder->onUnitComplete(unit);
 }
 
@@ -231,25 +240,9 @@ void StarterBot::onUnitComplete(BWAPI::Unit unit)
 // This is usually triggered when units appear from fog of war and become visible
 void StarterBot::onUnitShow(BWAPI::Unit unit)
 { 
-    // If the unit belongs to the enemy and is a building
-    if (unit->getPlayer() != BWAPI::Broodwar->self() &&
-        unit->getPlayer() != BWAPI::Broodwar->neutral() &&
-        unit->getType().isBuilding())
-    {
-        // Check if the building is close to any known base position
-        const auto& basePositions = BasesTools::GetBWEMBases();
-        bool foundBase = false;
-        for (const auto& basePos : basePositions) {
-            if (unit->getPosition().getApproxDistance(basePos) < 1280) {
-                BasesTools::SetEnemyBasePosition(basePos);
-                foundBase = true;
-                break;
-            }
-        }
-        // If not close to any known base, use the building's position
-        if (!foundBase) {
-            BasesTools::SetEnemyBasePosition(unit->getPosition());
-        }
+    if (BWAPI::Broodwar->self()->isEnemy(unit->getPlayer()) && unit->getType().isBuilding()) {
+        BasesTools::SetEnemyBasePosition(unit->getPosition());
+        MatchLog::UnitEvent("enemy_building_seen", unit);
     }
     currentBuildOrder->onUnitShow(unit);
 }

@@ -1,5 +1,5 @@
 #pragma once
-#include "../../src/starterbot/BuildOrder.h"
+#include "../../../visualstudio/src/starterbot/BuildOrder.h"
 
 class FivePool : public BuildOrder {
 public:

@@ -83,6 +83,8 @@
     <ClInclude Include="..\src\starterbot\ReplayParser.h" />
     <ClInclude Include="..\src\starterbot\StarterBot.h" />
     <ClInclude Include="..\src\starterbot\Tools.h" />
+    <ClInclude Include="..\src\starterbot\CombatPolicy.h" />
+    <ClInclude Include="..\src\starterbot\buildorders\MutaHive.h"><Filter>BOs</Filter></ClInclude>
     <ClInclude Include="BasesTools.h" />
     <ClInclude Include="src\starterbot\BuildOrder.h" />
     <ClInclude Include="..\src\starterbot\micro.h" />

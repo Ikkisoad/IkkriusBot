@@ -1,6 +1,7 @@
 #include <BWAPI.h>
 #include <BWAPI/Client.h>
 #include "StarterBot.h"
+#include "MatchLog.h"
 #include "ReplayParser.h"
 #include <iostream>
 #include <thread>
@@ -23,7 +24,7 @@ int main(int argc, char * argv[])
     while (BWAPI::BWAPIClient.isConnected())
     {
         // the starcraft exe has connected but we need to wait for the game to start
-        std::cout << "Waiting for game start\n";
+        std::cout << "Waiting for game start" << std::endl;
         while (BWAPI::BWAPIClient.isConnected() && !BWAPI::Broodwar->isInGame())
         {
             BWAPI::BWAPIClient.update();
@@ -37,12 +38,13 @@ int main(int argc, char * argv[])
         {
             if (!BWAPI::Broodwar->isReplay()) 
             { 
-                std::cout << "Playing Game " << gameCount++ << " on map " << BWAPI::Broodwar->mapFileName() << "\n";
-                PlayGame(); 
+                std::cout << "Playing Game " << gameCount++ << " on map " << BWAPI::Broodwar->mapFileName() << std::endl;
+                PlayGame();
+                if (argc > 1 && std::string(argv[1]) == "--once") return 0;
             }
             else 
             { 
-                std::cout << "Parsing Replay " << gameCount++ << " on map " << BWAPI::Broodwar->mapFileName() << "\n";
+                std::cout << "Parsing Replay " << gameCount++ << " on map " << BWAPI::Broodwar->mapFileName() << std::endl;
                 ParseReplay(); 
             }
         }
@@ -85,6 +87,7 @@ void PlayGame()
         }
     }
 
+    MatchLog::End("disconnected_or_aborted");
     std::cout << "Game Over\n";
 }
 

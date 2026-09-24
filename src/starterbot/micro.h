@@ -1,6 +1,7 @@
 #pragma once
 
 #include <BWAPI.h>
+#include <vector>
 
 namespace Micro
 {
@@ -11,6 +12,8 @@ namespace Micro
         Defensive
     };
 
+    BWAPI::Unitset GetBaseThreats();
+    bool DefendBases(BWAPI::Unit unit, const BWAPI::Unitset& threats);
     void SetMode(MicroMode newMode);
     MicroMode GetMode();
 
@@ -31,9 +34,17 @@ namespace Micro
     void Retreat(BWAPI::Unit unit);
     void Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal);
     
+    void ResetCombatState();
+    std::vector<BWAPI::Unitset> GetHydraGroups(const BWAPI::Unitset& units);
+    void LurkerSupportLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);
+    void DevourerEscortLoop(BWAPI::Unit unit, BWAPI::Position escort);
+    bool SpellReserved(BWAPI::TechType tech, BWAPI::Unit target, BWAPI::Position position);
+
     // HiveTech Micro
-    void HiveTechMicroLoop(BWAPI::Unitset myUnits);
+    void GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);
+    void SmartAttackMove(BWAPI::Unit unit, BWAPI::Position position);
+    void HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave = {});
     void MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies);
     void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies);
-    void QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies);
+    bool QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies);
 }

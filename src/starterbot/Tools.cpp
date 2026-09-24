@@ -1,4 +1,5 @@
 #include "Tools.h"
+#include "MatchLog.h"
 #include <BWAPI.h>
 #include <vector>
 #include <algorithm>
@@ -29,13 +30,18 @@ BWAPI::Unit Tools::GetClosestUnitTo(BWAPI::Unit unit, const BWAPI::Unitset& unit
 int Tools::CountUnitsOfType(BWAPI::UnitType type, const BWAPI::Unitset& units, const bool inProgress)
 {
     int sum = 0;
-    for (auto& unit : units)
-    {
-        //Count units that are being produced
-        if (unit->getType() == type || inProgress && (unit->getBuildType() == type || unit->getLastCommand().getType() == BWAPI::UnitCommandTypes::Build && unit->getLastCommand().getUnitType() == type))
-        {
-            sum++;
-            if (type == BWAPI::UnitTypes::Zerg_Zergling || type == BWAPI::UnitTypes::Zerg_Scourge) sum++;
+    for (auto unit : units) {
+        if (unit->getType() == type) {
+            if (inProgress || unit->isCompleted()) ++sum;
+        } else if (inProgress) {
+            const auto command = unit->getLastCommand();
+            const bool pending = unit->getBuildType() == type ||
+                ((command.getType() == BWAPI::UnitCommandTypes::Build &&
+                  (!unit->isIdle() || BWAPI::Broodwar->getFrameCount() - unit->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames())) ||
+                 (command.getType() == BWAPI::UnitCommandTypes::Morph &&
+                  BWAPI::Broodwar->getFrameCount() - unit->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames())) &&
+                command.getUnitType() == type;
+            if (pending) sum += type.isTwoUnitsInOneEgg() ? 2 : 1;
         }
     }
 
@@ -88,15 +94,115 @@ void Tools::Scout(BWAPI::Unit scout) {
     }
 }
 
-void Tools::GatherGas(BWAPI::Unit extractor) {
+void Tools::GatherGas(BWAPI::Unit extractor, int targetWorkers) {
+    if (!extractor || !extractor->isCompleted()) return;
     int count = 0;
-    // For each unit that we own
-    for (auto& unit : BWAPI::Broodwar->self()->getUnits()) {
-        // if the unit is of the correct type, and it actually has been constructed, return it
-        if (unit->getType().isWorker()) {
-            unit->gather(extractor);
-            count++;
-            if (count >= 3) return;
+    for (auto worker : BWAPI::Broodwar->self()->getUnits()) {
+        if (!worker->getType().isWorker()) continue;
+        if (worker->getLastCommand().getTarget() == extractor &&
+            (!worker->isIdle() || worker->getLastCommandFrame() == BWAPI::Broodwar->getFrameCount())) ++count;
+    }
+    for (auto worker : BWAPI::Broodwar->self()->getUnits()) {
+        if (count <= targetWorkers) break;
+        if (!worker->getType().isWorker() || worker->getLastCommand().getTarget() != extractor ||
+            worker->isCarryingGas() || worker->isCarryingMinerals() || HasPendingConstruction(worker) ||
+            worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) continue;
+        auto mineral = GetClosestUnitTo(worker, BWAPI::Broodwar->getMinerals());
+        if (mineral && worker->gather(mineral)) --count;
+    }
+    for (auto worker : BWAPI::Broodwar->self()->getUnits()) {
+        if (count >= targetWorkers) break;
+        if (!worker->getType().isWorker() || HasPendingConstruction(worker) || !worker->isCompleted() || worker->isConstructing() ||
+            worker->isCarryingMinerals() || worker->isCarryingGas() || worker->isGatheringGas() ||
+            (!worker->isIdle() && !worker->isGatheringMinerals()) ||
+            worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) continue;
+        const auto command = worker->getLastCommand();
+        if ((command.getType() == BWAPI::UnitCommandTypes::Build && !worker->isIdle()) ||
+            (command.getTarget() && command.getTarget()->getType().isRefinery() && !worker->isIdle())) continue;
+        if (worker->gather(extractor)) ++count;
+    }
+}
+
+bool Tools::BuildMacroHatchery() {
+    if (IsQueued(BWAPI::UnitTypes::Zerg_Hatchery).isValid()) return false;
+    const auto position = BWAPI::Broodwar->getBuildLocation(BWAPI::UnitTypes::Zerg_Hatchery,
+        BWAPI::Broodwar->self()->getStartLocation(), 12, false);
+    if (!position.isValid()) return false;
+    return TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, position);
+}
+
+bool Tools::EnsureBaseGas(BWAPI::Unit depot) {
+    if (!depot || !depot->isCompleted()) return false;
+    const auto units = BWAPI::Broodwar->self()->getUnits();
+    for (auto unit : units) {
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Extractor && unit->getDistance(depot) < 320) return true;
+    }
+    if (Tools::IsQueued(BWAPI::UnitTypes::Zerg_Extractor).isValid()) return false;
+    if (BWAPI::Broodwar->self()->minerals() < 50) return false;
+    for (auto geyser : BWAPI::Broodwar->getGeysers()) {
+        if (geyser->getDistance(depot) >= 320 || geyser->getResources() <= 0) continue;
+        const bool accepted = BuildBuildingOptimal(BWAPI::UnitTypes::Zerg_Extractor, geyser->getTilePosition());
+        MatchLog::Command("base_gas", "Zerg Extractor", accepted);
+        return accepted;
+    }
+    return false;
+}
+
+bool Tools::EnsureGroundDefense(BWAPI::Unit depot, int target) {
+    if (!depot || !depot->isCompleted() || CountUnitOfType(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) return false;
+    int colonies = 0;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit->getDistance(depot) > 256) continue;
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Creep_Colony) {
+            ++colonies;
+            if (unit->isCompleted()) return MorphUnit(unit, BWAPI::UnitTypes::Zerg_Sunken_Colony);
+        } else if (unit->getType() == BWAPI::UnitTypes::Zerg_Sunken_Colony) ++colonies;
+    }
+    if (colonies >= target || IsQueued(BWAPI::UnitTypes::Zerg_Creep_Colony).isValid() ||
+        BWAPI::Broodwar->self()->minerals() < 125) return false;
+    const bool accepted = BuildBuildingOptimal(BWAPI::UnitTypes::Zerg_Creep_Colony, depot->getTilePosition());
+    MatchLog::Command("base_defense", "Zerg Creep Colony", accepted);
+    return accepted;
+}
+
+void Tools::BalanceMineralWorkers() {
+    // Transfer one available miner at a time; preserve gas, cargo, and construction orders.
+    if (BWAPI::Broodwar->getFrameCount() % 24 != 0) return;
+    const auto units = BWAPI::Broodwar->self()->getUnits();
+    BWAPI::Unitset depots;
+    for (auto unit : units) {
+        if (unit->getType().isResourceDepot() && unit->isCompleted()) depots.insert(unit);
+    }
+    for (auto depot : depots) {
+        BWAPI::Unitset minerals;
+        for (auto mineral : BWAPI::Broodwar->getMinerals()) {
+            if (mineral->getDistance(depot) < 320 && mineral->getResources() > 0) minerals.insert(mineral);
+        }
+        if (minerals.empty()) continue;
+        int assigned = 0;
+        for (auto worker : units) {
+            if (!worker->getType().isWorker() || !worker->isGatheringMinerals()) continue;
+            const auto target = worker->getLastCommand().getTarget();
+            if (target && minerals.count(target)) ++assigned;
+        }
+        if (assigned >= static_cast<int>(minerals.size()) * 2) continue;
+        for (auto worker : units) {
+            if (!worker->getType().isWorker() || !worker->isGatheringMinerals() ||
+                worker->isCarryingMinerals() || worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) continue;
+            const auto command = worker->getLastCommand();
+            if (command.getType() == BWAPI::UnitCommandTypes::Build || !command.getTarget() ||
+                !command.getTarget()->getType().isMineralField()) continue;
+            const auto source = GetClosestUnitTo(command.getTarget(), depots);
+            if (!source || source == depot) continue;
+            int sourceWorkers = 0;
+            for (auto other : units) {
+                const auto target = other->getLastCommand().getTarget();
+                if (other->getType().isWorker() && other->isGatheringMinerals() && target &&
+                    GetClosestUnitTo(target, depots) == source) ++sourceWorkers;
+            }
+            if (sourceWorkers <= assigned + 1) continue;
+            const auto target = GetClosestUnitTo(depot, minerals);
+            if (worker->gather(target)) return;
         }
     }
 }
@@ -108,19 +214,22 @@ BWAPI::Unit Tools::GetDepot()
 }
 
 bool Tools::TryBuildBuilding(BWAPI::UnitType building, int limitAmount = 0, BWAPI::TilePosition desiredPos = BWAPI::Broodwar->self()->getStartLocation()) {
-    if (Tools::IsQueued(building) == desiredPos || Tools::IsReady(building) && limitAmount != 0) {
+    if (!desiredPos.isValid()) return false;
+    // Depots are limited per expansion site; tech buildings are limited globally.
+    if (building == BWAPI::UnitTypes::Zerg_Hatchery) {
+        for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+            if (unit->getType().isResourceDepot() && unit->getTilePosition() == desiredPos) return true;
+        }
+        if (Tools::IsQueued(building) == desiredPos) return true;
+    } else if (limitAmount > 0 &&
+        CountUnitsOfType(building, BWAPI::Broodwar->self()->getUnits(), true) >= limitAmount) {
         return true;
     }
-
-    if (BWAPI::Broodwar->self()->minerals() <= building.mineralPrice()) {
-        return false;
-    }
-
-    if (limitAmount != 0 && Tools::CountUnitsOfType(building, BWAPI::Broodwar->self()->getUnits(), true) >= limitAmount) {
-        return false;
-    }
-
-    return Tools::BuildBuildingOptimal(building, desiredPos);
+    if (BWAPI::Broodwar->self()->minerals() < building.mineralPrice() ||
+        BWAPI::Broodwar->self()->gas() < building.gasPrice()) return false;
+    const bool accepted = Tools::BuildBuildingOptimal(building, desiredPos);
+    MatchLog::Command("build", building.getName(), accepted);
+    return accepted;
 }
 
 bool Tools::TrainUnit(BWAPI::UnitType unit) {
@@ -134,35 +243,73 @@ bool Tools::TrainUnit(BWAPI::UnitType unit) {
     return false;
 }
 
+bool Tools::HasPendingConstruction(BWAPI::Unit unit) {
+    if (!unit || !unit->getType().isWorker()) return false;
+    return unit->getLastCommand().getType() == BWAPI::UnitCommandTypes::Build &&
+        (!unit->isIdle() || BWAPI::Broodwar->getFrameCount() - unit->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames());
+}
+
+std::pair<int, int> Tools::GetConstructionReserve() {
+    int minerals = 0, gas = 0;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (!HasPendingConstruction(unit)) continue;
+        const auto type = unit->getLastCommand().getUnitType();
+        minerals += type.mineralPrice();
+        gas += type.gasPrice();
+    }
+    return {minerals, gas};
+}
+
+bool Tools::MorphUnit(BWAPI::Unit source, BWAPI::UnitType type) {
+    if (!source || !source->isCompleted() || source->isMorphing() ||
+        source->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return false;
+    const auto command = source->getLastCommand();
+    // A different morph must not overwrite a command still awaiting BWAPI latency.
+    if (command.getType() == BWAPI::UnitCommandTypes::Morph &&
+        BWAPI::Broodwar->getFrameCount() - source->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames()) return false;
+    const auto reserve = GetConstructionReserve();
+    if (BWAPI::Broodwar->self()->minerals() - reserve.first < type.mineralPrice() ||
+        BWAPI::Broodwar->self()->gas() - reserve.second < type.gasPrice()) return false;
+    const bool accepted = source->canMorph(type) && source->morph(type);
+    MatchLog::Command("morph", type.getName(), accepted);
+    return accepted;
+}
+
 bool Tools::MorphLarva(BWAPI::UnitType unit) {
-    for (auto& larva : BWAPI::Broodwar->self()->getUnits()) {
-        if (larva->getType() == BWAPI::UnitTypes::Zerg_Larva && larva->isCompleted()) {
-            if (larva->getLastCommandFrame() < BWAPI::Broodwar->getFrameCount() && !larva->isMorphing()) {
-                if (larva->train(unit)) {
-                    return true;
-                }
-            }
-        }
+    for (auto larva : BWAPI::Broodwar->self()->getUnits()) {
+        if (larva->getType() == BWAPI::UnitTypes::Zerg_Larva && MorphUnit(larva, unit)) return true;
     }
     return false;
 }
 
 bool Tools::ResearchUpgrade(BWAPI::UpgradeType upgrade) {
-    for (auto u : BWAPI::Broodwar->self()->getUnits()) {
-        // if the unit is a hatchery, lair or hive, and it has enough minerals and gas
-        if (u->canResearch(upgrade) && BWAPI::Broodwar->self()->minerals() >= upgrade.mineralPrice() && BWAPI::Broodwar->self()->gas() >= upgrade.gasPrice()) {
-            return u->upgrade(upgrade);
-        }
-	}
+    if (BWAPI::Broodwar->self()->isUpgrading(upgrade)) return false;
+    const auto reserve = GetConstructionReserve();
+    const int level = BWAPI::Broodwar->self()->getUpgradeLevel(upgrade) + 1;
+    if (BWAPI::Broodwar->self()->minerals() - reserve.first < upgrade.mineralPrice(level) ||
+        BWAPI::Broodwar->self()->gas() - reserve.second < upgrade.gasPrice(level)) return false;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount() || !unit->canUpgrade(upgrade)) continue;
+        const bool accepted = unit->upgrade(upgrade);
+        MatchLog::Command("upgrade", upgrade.getName(), accepted);
+        return accepted;
+    }
+    return false;
 }
 
 bool Tools::ResearchTech(BWAPI::TechType upgrade) {
+    const auto reserve = GetConstructionReserve();
+    if (BWAPI::Broodwar->self()->minerals() - reserve.first < upgrade.mineralPrice() ||
+        BWAPI::Broodwar->self()->gas() - reserve.second < upgrade.gasPrice()) return false;
     for (auto u : BWAPI::Broodwar->self()->getUnits()) {
         // if the unit is a hatchery, lair or hive, and it has enough minerals and gas
-        if (u->canResearch(upgrade) && BWAPI::Broodwar->self()->minerals() >= upgrade.mineralPrice() && BWAPI::Broodwar->self()->gas() >= upgrade.gasPrice()) {
-            return u->research(upgrade);
+        if (u->getLastCommandFrame() < BWAPI::Broodwar->getFrameCount() && u->canResearch(upgrade) && BWAPI::Broodwar->self()->minerals() >= upgrade.mineralPrice() && BWAPI::Broodwar->self()->gas() >= upgrade.gasPrice()) {
+            const bool accepted = u->research(upgrade);
+            MatchLog::Command("research", upgrade.getName(), accepted);
+            return accepted;
         }
     }
+    return false;
 }
 
 // Attempt to construct a building of a given type 
@@ -204,13 +351,19 @@ static bool IsNearMiningPath(const BWAPI::TilePosition& tile, int buffer = 2) {
 }
 
 bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desiredPos) {
+    if (!desiredPos.isValid()) return false;
+    const auto reserve = GetConstructionReserve();
+    if (BWAPI::Broodwar->self()->minerals() - reserve.first < type.mineralPrice() ||
+        BWAPI::Broodwar->self()->gas() - reserve.second < type.gasPrice()) return false;
     // Get the type of unit that is required to build the desired building
     BWAPI::UnitType builderType = type.whatBuilds().first;
     BWAPI::Unit builder = nullptr;
     // Find the closest available builder to the desired position
     int minDist = std::numeric_limits<int>::max();
     for (auto& unit : BWAPI::Broodwar->self()->getUnits()) {
-        if (unit->getType() == builderType && unit->isCompleted() && !unit->isConstructing()) {
+        if (unit->getType() == builderType && unit->isCompleted() && !unit->isConstructing() &&
+            !unit->isMorphing() && unit->getLastCommandFrame() < BWAPI::Broodwar->getFrameCount() &&
+            !HasPendingConstruction(unit)) {
             int dist = unit->getDistance(BWAPI::Position(desiredPos));
             if (dist < minDist) {
                 minDist = dist;
@@ -225,14 +378,13 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
 
         if (type == BWAPI::UnitTypes::Zerg_Hive || type == BWAPI::UnitTypes::Zerg_Lair || type == BWAPI::UnitTypes::Zerg_Sunken_Colony || type == BWAPI::UnitTypes::Zerg_Spore_Colony) {
             // Special case for Hive and Lair, they can only be built at the main base
-            builder->morph(type);
-            return true;
+            return Tools::MorphUnit(builder, type);
         }
 
-        int maxBuildRange = 16; // Tight range for fast buildings like Spawning Pool
-        BWAPI::TilePosition startTile = builder->getTilePosition();
+        int maxBuildRange = type == BWAPI::UnitTypes::Zerg_Creep_Colony ? 6 : 16;
+        BWAPI::TilePosition startTile = desiredPos;
 
-        // Search for a valid build location near the builder, avoiding mining paths
+        // Search around the requested base, avoiding mining paths
         BWAPI::TilePosition bestPos = BWAPI::TilePositions::Invalid;
         int bestDist = std::numeric_limits<int>::max();
 
@@ -254,9 +406,13 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
         if (bestPos.isValid()) {
             return builder->build(type, bestPos);
         }
-    } else if (!BWAPI::Broodwar->isExplored(desiredPos) || !builder->build(type, desiredPos)) {
-        Micro::SmartScoutMove(builder, BWAPI::Position(desiredPos));
-        return true;
+    } else {
+        // A scouting move is not a successful construction order. Retry on later frames.
+        if (!BWAPI::Broodwar->isExplored(desiredPos)) {
+            Micro::SmartMove(builder, BWAPI::Position(desiredPos));
+            return false;
+        }
+        return builder->build(type, desiredPos);
     }
 
     // Fallback: use BWAPI's default search if no optimal found
@@ -354,9 +510,13 @@ int Tools::GetTotalSupply(bool inProgress)
     // if we do care about supply in progress, check all the currently constructing units if they will add supply
     for (auto& unit : BWAPI::Broodwar->self()->getUnits())
     {
-        if (unit->getType() == BWAPI::UnitTypes::Zerg_Egg && unit->getBuildType() == BWAPI::UnitTypes::Zerg_Overlord) {
-            totalSupply += BWAPI::UnitTypes::Zerg_Overlord.supplyProvided();
-        }
+        const auto command = unit->getLastCommand();
+        const bool overlordEgg = unit->getType() == BWAPI::UnitTypes::Zerg_Egg &&
+            unit->getBuildType() == BWAPI::UnitTypes::Zerg_Overlord;
+        const bool pendingOverlord = unit->getType() == BWAPI::UnitTypes::Zerg_Larva &&
+            command.getType() == BWAPI::UnitCommandTypes::Morph && command.getUnitType() == BWAPI::UnitTypes::Zerg_Overlord &&
+            BWAPI::Broodwar->getFrameCount() - unit->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames();
+        if (overlordEgg || pendingOverlord) totalSupply += BWAPI::UnitTypes::Zerg_Overlord.supplyProvided();
     }
 
     // one last tricky case: if a unit is currently on its way to build a supply provider, add it
@@ -366,7 +526,7 @@ int Tools::GetTotalSupply(bool inProgress)
         const BWAPI::UnitCommand& command = unit->getLastCommand();
 
         // if it's not a build command we can ignore it
-        if (command.getType() != BWAPI::UnitCommandTypes::Build) { continue; }
+        if (!HasPendingConstruction(unit)) { continue; }
 
         // add the supply amount of the unit that it's trying to build
         totalSupply += command.getUnitType().supplyProvided();
@@ -382,7 +542,8 @@ BWAPI::TilePosition Tools::IsQueued(BWAPI::UnitType unit) {
         const BWAPI::UnitCommand& command = readyUnit->getLastCommand();
 
         // if it's not a build command we can ignore it
-        if (command.getType() != BWAPI::UnitCommandTypes::Build || command.getUnitType() != unit) { continue; }
+        if (command.getType() != BWAPI::UnitCommandTypes::Build || command.getUnitType() != unit ||
+            (readyUnit->isIdle() && BWAPI::Broodwar->getFrameCount() - readyUnit->getLastCommandFrame() > BWAPI::Broodwar->getLatencyFrames())) { continue; }
 
         return command.getTargetTilePosition();
     }

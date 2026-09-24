@@ -1,6 +1,6 @@
 #pragma once
 #pragma once
-#include "../../src/starterbot/BuildOrder.h"
+#include "../../../visualstudio/src/starterbot/BuildOrder.h"
 #include <BWAPI.h>
 
 class Overpool : public BuildOrder {

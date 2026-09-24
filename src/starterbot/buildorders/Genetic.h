@@ -1,5 +1,5 @@
 #pragma once
-#include "../../src/starterbot/BuildOrder.h"
+#include "../../../visualstudio/src/starterbot/BuildOrder.h"
 #include <BWAPI.h>
 #include <vector>
 #include <string>

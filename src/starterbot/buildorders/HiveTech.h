@@ -1,5 +1,5 @@
 #pragma once
-#include "../../src/starterbot/BuildOrder.h"
+#include "../../../visualstudio/src/starterbot/BuildOrder.h"
 #include <BWAPI.h>
 
 class HiveTech : public BuildOrder {
@@ -11,8 +11,11 @@ public:
     void onStart() override;
     std::string GetName() const override { return "HiveTech"; }
 
+protected:
+    explicit HiveTech(bool airBuild = false) : m_airBuild(airBuild) {}
+
 private:
-    HiveTech() = default;
+    const bool m_airBuild;
 
     enum class Phase {
         SafeOpener,
@@ -43,7 +46,18 @@ private:
     int  zerglingsTarget = 6;
     bool hasNatural = false;
     
+    bool m_attacking = false;
+    BWAPI::Unitset m_pressureWave;
+    void UpdatePressureWave(bool safe, int armySupply);
+    int m_reserveMinerals = 0;
+    int m_reserveGas = 0;
+
     // Helpers
+    void MaintainQueenSupport();
+    void ExecuteAirTech();
+    void ExecuteAirHarass();
+    void ExecuteAirAssault();
+    void SpendArmyBudget(int reserveMinerals, int reserveGas, int reserveSupply = 0);
     void ExecuteSafeOpener();
     void ExecuteTechToLair();
     void ExecuteLairHarass();

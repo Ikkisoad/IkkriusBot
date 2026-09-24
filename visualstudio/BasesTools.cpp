@@ -69,7 +69,8 @@ namespace BasesTools {
     // Not working properly
     void BasesTools::VerifyEnemyBases() {
 		bool breakLoop = false;
-        for (auto base : enemyBasePositions) {
+        const auto knownPositions = enemyBasePositions;
+        for (auto base : knownPositions) {
             breakLoop = false;
 			BWAPI::TilePosition tilePosition = BWAPI::TilePosition(base);
 			if (!BWAPI::Broodwar->isVisible(tilePosition)) continue;
@@ -294,14 +295,34 @@ namespace BasesTools {
         }
     }
 
+    int BasesTools::CountMiningSites() {
+        int count = 0;
+        for (auto position : allBasePositions) {
+            for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+                if (unit->exists() && unit->getType().isResourceDepot() &&
+                    unit->getTilePosition() == BWAPI::TilePosition(position)) { ++count; break; }
+            }
+        }
+        return count;
+    }
+
     BWAPI::TilePosition BasesTools::GetNextExpansionPosition() {
         BWAPI::TilePosition bestPos = BWAPI::TilePositions::None;
         int minDist = std::numeric_limits<int>::max();
         BWAPI::TilePosition myMain = mainBasePosition;
+        const auto mainArea = bwem.GetNearestArea(myMain);
         for (auto b : allBasePositions) {
+            const auto area = bwem.GetNearestArea(BWAPI::TilePosition(b));
+            if (!mainArea || !area || !area->AccessibleFrom(mainArea)) continue;
             // Skip if area is already occupied by us or enemy
             if (IsAreaOurBase(b, 3) || IsAreaEnemyBase(b, 3))
                 continue;
+            bool threatened = false;
+            for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
+                if (enemy->exists() && enemy->isVisible() && BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer()) &&
+                    enemy->getType().canAttack() && enemy->getDistance(b) < 384) { threatened = true; break; }
+            }
+            if (threatened) continue;
             int dist = BWAPI::Position(myMain).getApproxDistance(b);
             if (dist < minDist) {
                 minDist = dist;

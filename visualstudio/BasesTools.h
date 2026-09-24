@@ -5,6 +5,7 @@
 namespace BasesTools {
 	bool IsAreaEnemyBase(BWAPI::Position position, int range);
 	void Initialize();
+	int CountMiningSites();
 	bool IsAreaOurBase(BWAPI::Position position, int range);
 	void CacheBWEMBases();
 	const std::vector<BWAPI::Position>& GetAllOurBasePositions();

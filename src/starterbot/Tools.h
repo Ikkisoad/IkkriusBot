@@ -1,6 +1,7 @@
 #pragma once
 
 #include <BWAPI.h>
+#include <utility>
 
 namespace Tools
 {
@@ -12,11 +13,18 @@ namespace Tools
     BWAPI::Unit GetUnitOfType(BWAPI::UnitType type);
     int CountUnitOfType(BWAPI::UnitType type);
     void Scout(BWAPI::Unit scout);
-    void GatherGas(BWAPI::Unit extractor);
+    void BalanceMineralWorkers();
+    void GatherGas(BWAPI::Unit extractor, int targetWorkers = 3);
+    bool BuildMacroHatchery();
+    bool EnsureBaseGas(BWAPI::Unit depot);
+    bool EnsureGroundDefense(BWAPI::Unit depot, int target);
     BWAPI::Unit GetDepot();
 
     bool TryBuildBuilding(BWAPI::UnitType building, int limitAmount, BWAPI::TilePosition desiredPos);
     bool TrainUnit(BWAPI::UnitType unit);
+    bool HasPendingConstruction(BWAPI::Unit unit);
+    std::pair<int, int> GetConstructionReserve();
+    bool MorphUnit(BWAPI::Unit source, BWAPI::UnitType type);
     bool MorphLarva(BWAPI::UnitType unit);
     bool ResearchUpgrade(BWAPI::UpgradeType upgrade);
     bool ResearchTech(BWAPI::TechType upgrade);

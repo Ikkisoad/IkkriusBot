@@ -37,3 +37,9 @@ src/starterbot/stats/data/*.csv
 bin_linux/src
 !libgcc_s_dw2-1.dll
 !libstdc++-6.dll
+
+# Per-match diagnostics and alternate build output
+bin/logs/
+bin/updated/
+
+__pycache__/

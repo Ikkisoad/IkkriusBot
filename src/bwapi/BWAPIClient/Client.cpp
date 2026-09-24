@@ -33,30 +33,41 @@ namespace BWAPI
     int serverProcID    = -1;
     int gameTableIndex  = -1;
 
-    this->gameTable = NULL;
+    // Release resources left by any previous failed connection attempt.
+    this->disconnect();
     this->gameTableFileHandle = OpenFileMappingA(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, "Local\\bwapi_shared_memory_game_list" );
     if ( !this->gameTableFileHandle )
     {
       std::cerr << "Game table mapping not found." << std::endl;
+      disconnect();
       return false;
     }
     this->gameTable = static_cast<GameTable*>( MapViewOfFile(this->gameTableFileHandle, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(GameTable)) );
     if ( !this->gameTable )
     {
       std::cerr << "Unable to map Game table." << std::endl;
+      disconnect();
       return false;
     }
 
     //Find row with most recent keep alive that isn't connected
-    DWORD latest = 0;
+    const DWORD now = GetTickCount();
+    DWORD youngestAge = MAXDWORD;
     for(int i = 0; i < GameTable::MAX_GAME_INSTANCES; i++)
     {
       std::cout << i << " | " << gameTable->gameInstances[i].serverProcessID << " | " << gameTable->gameInstances[i].isConnected << " | " << gameTable->gameInstances[i].lastKeepAliveTime << std::endl;
       if (gameTable->gameInstances[i].serverProcessID != 0 && !gameTable->gameInstances[i].isConnected)
       {
-        if ( gameTableIndex == -1 || latest == 0 || gameTable->gameInstances[i].lastKeepAliveTime < latest )
+        // Stale table rows can outlive StarCraft while another client maps the table.
+        std::stringstream candidatePipe;
+        candidatePipe << "\\\\.\\pipe\\bwapi_pipe_" << gameTable->gameInstances[i].serverProcessID;
+        if (!WaitNamedPipeA(candidatePipe.str().c_str(), 1))
+          continue;
+
+        const DWORD age = now - gameTable->gameInstances[i].lastKeepAliveTime;
+        if (gameTableIndex == -1 || age < youngestAge)
         {
-          latest = gameTable->gameInstances[i].lastKeepAliveTime;
+          youngestAge = age;
           gameTableIndex = i;
         }
       }
@@ -68,6 +79,7 @@ namespace BWAPI
     if (serverProcID == -1)
     {
       std::cerr << "No server proc ID" << std::endl;
+      disconnect();
       return false;
     }
     
@@ -83,7 +95,7 @@ namespace BWAPI
     if ( pipeObjectHandle == INVALID_HANDLE_VALUE )
     {
       std::cerr << "Unable to open communications pipe: " << communicationPipe.str() << std::endl;
-      CloseHandle(gameTableFileHandle);
+      disconnect();
       return false;
     }
 
@@ -100,14 +112,14 @@ namespace BWAPI
     if (mapFileHandle == INVALID_HANDLE_VALUE || mapFileHandle == NULL)
     {
       std::cerr << "Unable to open shared memory mapping: " << sharedMemoryName.str() << std::endl;
-      CloseHandle(pipeObjectHandle);
-      CloseHandle(gameTableFileHandle);
+      disconnect();
       return false;
     }
     data = static_cast<GameData*>( MapViewOfFile(mapFileHandle, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(GameData)) );
     if ( data == nullptr )
     {
       std::cerr << "Unable to map game data." << std::endl;
+      disconnect();
       return false;
     }
 
@@ -149,26 +161,32 @@ namespace BWAPI
   }
   void Client::disconnect()
   {
-    if ( !this->connected ) return;
-    
-    if ( gameTableFileHandle != INVALID_HANDLE_VALUE )
+    const bool wasConnected = connected;
+    connected = false;
+
+    if (BWAPI::BroodwarPtr)
+      delete static_cast<GameImpl*>(BWAPI::BroodwarPtr);
+    BWAPI::BroodwarPtr = nullptr;
+
+    if (data)
+      UnmapViewOfFile(data);
+    data = nullptr;
+    if (gameTable)
+      UnmapViewOfFile(gameTable);
+    gameTable = nullptr;
+
+    if (gameTableFileHandle && gameTableFileHandle != INVALID_HANDLE_VALUE)
       CloseHandle(gameTableFileHandle);
     gameTableFileHandle = INVALID_HANDLE_VALUE;
-
-    if ( pipeObjectHandle != INVALID_HANDLE_VALUE )
+    if (pipeObjectHandle && pipeObjectHandle != INVALID_HANDLE_VALUE)
       CloseHandle(pipeObjectHandle);
     pipeObjectHandle = INVALID_HANDLE_VALUE;
-    
-    if ( mapFileHandle != INVALID_HANDLE_VALUE )
+    if (mapFileHandle && mapFileHandle != INVALID_HANDLE_VALUE)
       CloseHandle(mapFileHandle);
     mapFileHandle = INVALID_HANDLE_VALUE;
 
-    this->connected = false;
-    std::cout << "Disconnected" << std::endl;
-
-    if ( BWAPI::BroodwarPtr )
-      delete static_cast<GameImpl*>(BWAPI::BroodwarPtr);
-    BWAPI::BroodwarPtr = nullptr;
+    if (wasConnected)
+      std::cout << "Disconnected" << std::endl;
   }
   void Client::update()
   {
