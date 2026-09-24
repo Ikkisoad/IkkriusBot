@@ -135,12 +135,14 @@ bool Tools::TrainUnit(BWAPI::UnitType unit) {
 }
 
 bool Tools::MorphLarva(BWAPI::UnitType unit) {
-    const BWAPI::Unit larva = Tools::GetUnitOfType(BWAPI::UnitTypes::Zerg_Larva);
-
-    // if we have a valid depot unit and it's currently not training something, train a worker
-    // there is no reason for a bot to ever use the unit queueing system, it just wastes resources
-    if (larva) {
-        return larva->train(unit);
+    for (auto& larva : BWAPI::Broodwar->self()->getUnits()) {
+        if (larva->getType() == BWAPI::UnitTypes::Zerg_Larva && larva->isCompleted()) {
+            if (larva->getLastCommandFrame() < BWAPI::Broodwar->getFrameCount() && !larva->isMorphing()) {
+                if (larva->train(unit)) {
+                    return true;
+                }
+            }
+        }
     }
     return false;
 }
@@ -352,11 +354,9 @@ int Tools::GetTotalSupply(bool inProgress)
     // if we do care about supply in progress, check all the currently constructing units if they will add supply
     for (auto& unit : BWAPI::Broodwar->self()->getUnits())
     {
-        // ignore units that are fully completed
-        if (unit->getBuildType() != BWAPI::UnitTypes::Zerg_Overlord || unit->getType() == BWAPI::UnitTypes::Zerg_Overlord && !unit->isCompleted()) { continue; }
-
-        // if they are not completed, then add their supply provided to the total supply
-        totalSupply += BWAPI::UnitTypes::Zerg_Overlord.supplyProvided();
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Egg && unit->getBuildType() == BWAPI::UnitTypes::Zerg_Overlord) {
+            totalSupply += BWAPI::UnitTypes::Zerg_Overlord.supplyProvided();
+        }
     }
 
     // one last tricky case: if a unit is currently on its way to build a supply provider, add it

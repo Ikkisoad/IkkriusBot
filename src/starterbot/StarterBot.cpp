@@ -78,6 +78,9 @@ void StarterBot::onFrame()
 
 // Train more workers so we can gather more income
 bool StarterBot::trainUnit(BWAPI::UnitType unit) {
+    if (unit.whatBuilds().first == BWAPI::UnitTypes::Zerg_Larva) {
+        return Tools::MorphLarva(unit);
+    }
     const BWAPI::Unit myDepot = Tools::GetDepot();
 
     // if we have a valid depot unit and it's currently not training something, train a worker

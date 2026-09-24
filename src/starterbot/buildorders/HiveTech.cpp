@@ -75,22 +75,22 @@ void HiveTech::ExecuteSafeOpener() {
     int supply = BWAPI::Broodwar->self()->supplyUsed();
     
     // Standard 12 Hatch / 11 Pool safe opening
-    if (supply < 18) { // 9 drones
-        Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Drone);
-    } else if (supply >= 18 && supply < 24 && !hasNatural) {
-        // Expand to natural
-        if (BWAPI::Broodwar->self()->minerals() >= 300) {
-            Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 0, BasesTools::GetNextExpansionPosition());
-            hasNatural = true;
-        } else {
+    if (!hasNatural) {
+        if (supply < 24) { // 12 drones
             Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Drone);
+        } else if (BWAPI::Broodwar->self()->minerals() >= 300) {
+            hasNatural = Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 0, BasesTools::GetNextExpansionPosition());
         }
     } else if (hasNatural && !builtSpawningPool) {
         if (BWAPI::Broodwar->self()->minerals() >= 200) {
             builtSpawningPool = Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Spawning_Pool, 1, BWAPI::Broodwar->self()->getStartLocation());
+        } else {
+            Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Drone);
         }
     } else if (builtSpawningPool && !builtExtractor) {
-        builtExtractor = Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Extractor, 1, BWAPI::Broodwar->self()->getStartLocation());
+        if (BWAPI::Broodwar->self()->minerals() >= 50) {
+            builtExtractor = Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Extractor, 1, BWAPI::Broodwar->self()->getStartLocation());
+        }
     } else if (builtSpawningPool && Tools::CountUnitsOfType(BWAPI::UnitTypes::Zerg_Spawning_Pool, myUnits, true) > 0) {
         // Build defensive zerglings
         int lingCount = Tools::CountUnitsOfType(BWAPI::UnitTypes::Zerg_Zergling, myUnits, true);
