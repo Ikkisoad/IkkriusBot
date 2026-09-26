@@ -58,6 +58,7 @@ struct FakeUnit {
     Command getLastCommand() const { return last; }
     int getLastCommandFrame() const { return lastFrame; }
     bool gather(Unit target);
+    bool stop() { orderTarget = nullptr; last.target = nullptr; gathering = false; idle = true; return true; }
 };
 struct Player { Unitset units; Unitset getUnits() const { return units; } };
 struct Game {
@@ -122,12 +123,22 @@ int main() {
     natural->type = UnitTypes::Zerg_Lair; natural->completed = false; natural->morphing = true;
     assert(GetMineralForWorker(fresh) == naturalPatch);
 
-    // Losing the natural pulls its miners to the main.
+    // Losing the natural pulls its miners to the main while it has room...
     game.player.units.erase(natural);
+    int onMain = 0; // Leave room for exactly one more miner at the main.
+    for (auto unit : game.player.units) if (unit->orderTarget == mainPatch && ++onMain > 1) unit->stop();
     auto orphan = own(UnitTypes::Zerg_Drone, 1600);
     orphan->gathering = true; orphan->orderTarget = naturalPatch; orphan->last.target = naturalPatch;
     FixLongDistanceMining();
     assert(orphan->orderTarget == mainPatch);
+
+    // ...but never oversaturates: with two miners on every patch a spare drone stays free to build.
+    assert(GetMineralForWorker(fresh) == nullptr);
+    assert(!GatherNearestBaseMinerals(fresh));
+    auto stranded = own(UnitTypes::Zerg_Drone, 1600);
+    stranded->gathering = true; stranded->orderTarget = naturalPatch; stranded->last.target = naturalPatch;
+    FixLongDistanceMining();
+    assert(stranded->orderTarget == nullptr && stranded->idle); // Stop long-distance mining; wait as a builder.
     (void)main;
     std::cout << "Mining regressions passed.\n";
 }

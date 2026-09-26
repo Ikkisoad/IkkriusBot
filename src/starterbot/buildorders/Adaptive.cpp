@@ -23,6 +23,8 @@ using Learning::Gene;
 namespace {
     constexpr int FramesPerSecond = 24;
     constexpr int EvaluationInterval = FramesPerSecond * 10;
+    constexpr int SpareBuilders = 2;      // Drones beyond full saturation, kept free to expand or build.
+    constexpr int ExcessMinerals = 400;   // Banked minerals above this are dumped into supply, lings and structures.
 
     const BWAPI::UnitType armyTypes[Learning::ArmyCount] = {
         BWAPI::UnitTypes::Zerg_Zergling, BWAPI::UnitTypes::Zerg_Hydralisk, BWAPI::UnitTypes::Zerg_Mutalisk,
@@ -82,6 +84,25 @@ namespace {
         return type == BWAPI::UnitTypes::Protoss_Corsair || type == BWAPI::UnitTypes::Terran_Valkyrie ||
             type == BWAPI::UnitTypes::Protoss_Archon || type == BWAPI::UnitTypes::Protoss_High_Templar ||
             type == BWAPI::UnitTypes::Terran_Science_Vessel || type == BWAPI::UnitTypes::Zerg_Devourer;
+    }
+
+    // Minerals already committed by orders BWAPI has not deducted yet (they land after latency).
+    int PendingOrderMinerals() {
+        const int frame = BWAPI::Broodwar->getFrameCount();
+        int minerals = 0;
+        for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+            if (frame - unit->getLastCommandFrame() > BWAPI::Broodwar->getLatencyFrames()) continue;
+            const auto command = unit->getLastCommand();
+            const auto type = command.getType();
+            if (type == BWAPI::UnitCommandTypes::Morph || type == BWAPI::UnitCommandTypes::Train)
+                minerals += command.getUnitType().mineralPrice();
+            else if (type == BWAPI::UnitCommandTypes::Research) minerals += command.getTechType().mineralPrice();
+            else if (type == BWAPI::UnitCommandTypes::Upgrade) {
+                const auto upgrade = command.getUpgradeType();
+                minerals += upgrade.mineralPrice(BWAPI::Broodwar->self()->getUpgradeLevel(upgrade) + 1);
+            }
+        }
+        return minerals;
     }
 
     bool IsCapitalAir(BWAPI::UnitType type) {
@@ -333,6 +354,7 @@ void Adaptive::Execute() {
         if (!emergency) Upgrades(counts);
         MorphAdvancedUnits(counts);
         SpendArmyBudget(counts);
+        SpendExcessMinerals(counts, emergency);
 
         // Sunkens only where ground threats are actually hitting a base.
         for (auto depot : myUnits) {
@@ -473,8 +495,11 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     }
 
     const int perBase = m_genome.GetInt(Gene::DronesPerBase);
-    int targetDrones = std::min(m_genome.GetInt(Gene::MaxDrones), std::max(1, counts.miningSites) * perBase +
-        Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Extractor) * 3);
+    const int gasSlots = Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Extractor) * 3;
+    int targetDrones = std::min(m_genome.GetInt(Gene::MaxDrones), std::max(1, counts.miningSites) * perBase + gasSlots);
+    // Never breed drones past two per mineral patch (plus gas and a couple of builders).
+    const auto mining = Tools::GetMiningCapacity();
+    targetDrones = std::min(targetDrones, mining.mineralSlots + gasSlots + SpareBuilders);
     if (RushPending()) targetDrones = std::min(targetDrones, m_genome.GetInt(Gene::RushDroneCap));
     const double armyNeeded = m_genome.Get(Gene::ArmyPerDrone) * std::max(0, counts.drones - 12);
     if (!emergency && counts.drones < targetDrones && (m_openerDone || Ready(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) &&
@@ -490,18 +515,17 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     const bool later = counts.miningSites >= 2 && counts.miningSites < 6 &&
         counts.drones >= m_genome.GetInt(Gene::ThirdBaseDrones) + (counts.miningSites - 2) * perBase &&
         counts.drones >= counts.miningSites * perBase - 4 && !RushPending();
-    if (natural || later || surplus) {
+    // Every patch already has two miners: the spare drones go and take a new base.
+    const bool saturated = mining.mineralSlots > 0 && counts.miningSites < 8 && !RushPending() &&
+        mining.mineralWorkers + mining.idleWorkers >= mining.mineralSlots && mining.idleWorkers > 0;
+    if (natural || later || surplus || saturated) {
         const auto expansion = BasesTools::GetNextExpansionPosition();
         if (expansion.isValid()) {
             m_reserveMinerals = std::max(m_reserveMinerals, 300);
-            m_decision = surplus ? "surplus_expand" : "expand";
+            m_decision = surplus ? "surplus_expand" : saturated ? "saturated_expand" : "expand";
             Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, expansion);
             return;
         }
-    }
-    if (counts.bases >= 2 && counts.bases < 8 && counts.larva == 0 &&
-        self->minerals() >= std::max(m_reserveMinerals, reserved.first) + 600 && self->supplyUsed() < 380) {
-        if (Tools::BuildMacroHatchery()) m_decision = "increase_production";
     }
 }
 
@@ -554,10 +578,15 @@ void Adaptive::MorphAdvancedUnits(const Counts& counts) {
         return spec.Share(army) * total - counts.army[static_cast<int>(army)] * ArmyType(army).supplyRequired();
     };
     // Guardians and Devourers are Mutalisk morphs; Lurkers are Hydralisk morphs.
+    // Devourers are support, kept at one per five Mutalisks whatever the composition.
     if (HasTech(Tech::GreaterSpire, true)) {
-        for (auto target : { Army::Guardian, Army::Devourer }) {
-            if (spec.Share(target) <= 0 || deficit(target) < ArmyType(target).supplyRequired() ||
-                deficit(Army::Mutalisk) > deficit(target)) continue;
+        const int mutalisks = counts.army[static_cast<int>(Army::Mutalisk)];
+        const int devourers = counts.army[static_cast<int>(Army::Devourer)];
+        Army target = Army::Count;
+        if (CombatPolicy::WantDevourer(mutalisks, devourers)) target = Army::Devourer;
+        else if (spec.Share(Army::Guardian) > 0 && deficit(Army::Guardian) >= ArmyType(Army::Guardian).supplyRequired() &&
+                 deficit(Army::Mutalisk) <= deficit(Army::Guardian)) target = Army::Guardian;
+        if (target != Army::Count) {
             for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
                 if (unit->getType() != BWAPI::UnitTypes::Zerg_Mutalisk || !unit->isCompleted() || unit->isMorphing() ||
                     unit->isUnderAttack() || unit->getHitPoints() < unit->getType().maxHitPoints() / 2) continue;
@@ -566,7 +595,6 @@ void Adaptive::MorphAdvancedUnits(const Counts& counts) {
                 if (Tools::MorphUnit(unit, ArmyType(target))) MatchLog::Event("air_morph", ArmyType(target).getName());
                 break;
             }
-            break;
         }
     }
     if (spec.Share(Army::Lurker) > 0 && BWAPI::Broodwar->self()->hasResearched(BWAPI::TechTypes::Lurker_Aspect) &&
@@ -645,19 +673,114 @@ void Adaptive::SpendArmyBudget(const Counts& counts) {
     }
 }
 
+// Gas income trails mineral income, so banked minerals go into supply, Zerglings and structures
+// instead of piling up. Runs after the planned army so it only uses what that left over.
+void Adaptive::SpendExcessMinerals(const Counts& counts, bool emergency) {
+    const auto self = BWAPI::Broodwar->self();
+    // BWAPI only deducts costs once orders execute, so count this frame's orders ourselves.
+    int bank = self->minerals() - std::max(m_reserveMinerals, Tools::GetConstructionReserve().first) - PendingOrderMinerals();
+    if (bank < ExcessMinerals) return;
+
+    // Supply first, so spare larvae never wait on Overlords.
+    const int freeSupply = Tools::GetTotalSupply(true) - self->supplyUsed();
+    const int supplyBuffer = std::min(40, 16 + std::max(1, counts.bases) * 8);
+    if (self->supplyTotal() < 400 && freeSupply < supplyBuffer && Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Overlord)) {
+        m_decision = "excess_overlord";
+        return;
+    }
+
+    // Zerglings on the remaining larvae.
+    const bool lingComposition = Learning::Spec(m_composition).Share(Army::Zergling) > 0;
+    int lings = counts.army[static_cast<int>(Army::Zergling)];
+    int supply = self->supplyTotal() - self->supplyUsed();
+    if (Ready(BWAPI::UnitTypes::Zerg_Spawning_Pool) > 0) {
+        for (auto larva : self->getUnits()) {
+            if (larva->getType() != BWAPI::UnitTypes::Zerg_Larva || supply < 2 || bank < ExcessMinerals - 150 ||
+                (!lingComposition && lings >= 48)) continue;
+            if (!Tools::MorphUnit(larva, BWAPI::UnitTypes::Zerg_Zergling)) continue;
+            supply -= 2;
+            lings += 2;
+            bank -= BWAPI::UnitTypes::Zerg_Zergling.mineralPrice();
+            m_decision = "excess_zerglings";
+        }
+    }
+    if (emergency || bank < ExcessMinerals - 100 || !Ready(BWAPI::UnitTypes::Zerg_Spawning_Pool)) return;
+
+    // Out of larvae: more Hatcheries (one at a time), kept out of the mineral lines.
+    bool hatcheryInProgress = Tools::IsQueued(BWAPI::UnitTypes::Zerg_Hatchery).isValid();
+    for (auto unit : self->getUnits())
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Hatchery && !unit->isCompleted()) hatcheryInProgress = true;
+    if (!hatcheryInProgress && counts.larva <= 1 && counts.bases < 10 && self->supplyUsed() < 380 &&
+        Tools::BuildMacroHatchery()) {
+        m_decision = "excess_hatchery";
+        return;
+    }
+
+    // An Evolution Chamber unlocks Spore Colonies and ground upgrades.
+    if (!HasTech(Tech::EvolutionChamber, false)) {
+        if (Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Evolution_Chamber, 1, self->getStartLocation()))
+            m_decision = "excess_evolution_chamber";
+        return;
+    }
+
+    // Static defense at every mining base: Spores once enemy air has been seen, otherwise Sunkens.
+    bool enemyAir = false;
+    for (const auto& [id, type] : m_enemyUnits)
+        if (type.isFlyer() && (type.canAttack() || type == BWAPI::UnitTypes::Protoss_Carrier)) { enemyAir = true; break; }
+    const int perBase = bank >= 2 * ExcessMinerals ? 2 : 1;
+    for (auto depot : self->getUnits()) {
+        if (!depot->getType().isResourceDepot() || !depot->isCompleted()) continue;
+        bool mining = false;
+        for (auto mineral : BWAPI::Broodwar->getMinerals())
+            if (mineral->getResources() > 0 && mineral->getDistance(depot) < 320) { mining = true; break; }
+        if (!mining) continue;
+        if (Tools::EnsureStaticDefense(depot, perBase, enemyAir ? BWAPI::UnitTypes::Zerg_Spore_Colony : BWAPI::UnitTypes::Zerg_Sunken_Colony)) {
+            m_decision = "excess_static_defense";
+            return;
+        }
+    }
+}
+
+// Scouted enemy army in BWAPI supply units, with static defense counted as a few units' worth.
+int Adaptive::KnownEnemyArmySupply() const {
+    int supply = 0;
+    for (const auto& [id, type] : m_enemyUnits) {
+        if (IsStaticDefense(type)) { supply += 6; continue; }
+        if (type.isBuilding() || type.isWorker() || type == BWAPI::UnitTypes::Zerg_Overlord ||
+            type == BWAPI::UnitTypes::Zerg_Larva || type == BWAPI::UnitTypes::Zerg_Egg) continue;
+        if (!type.canAttack() && !type.isSpellcaster() && type != BWAPI::UnitTypes::Protoss_Carrier &&
+            type != BWAPI::UnitTypes::Protoss_Reaver) continue;
+        supply += std::max(1, type.supplyRequired());
+    }
+    return supply;
+}
+
 void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
     const int threshold = RushPending() ? m_genome.GetInt(Gene::RushAttackSupply) : m_genome.GetInt(Gene::AttackSupply);
     const int army = counts.armySupply / 2;
     const bool maxed = BWAPI::Broodwar->self()->supplyUsed() >= 380;
+    // Attack only when the scouted enemy army is clearly beatable; a small share of time
+    // windows also accept close odds. A maxed army still refuses a clearly lost fight.
+    const int enemyArmy = KnownEnemyArmySupply();
+    const bool gamble = CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount());
+    const bool winnable = maxed ? !CombatPolicy::AttackLost(counts.armySupply, enemyArmy)
+                                : CombatPolicy::AttackWinnable(counts.armySupply, enemyArmy, gamble);
     if (!m_attacking && !emergency && (army >= threshold || maxed)) {
+        if (!winnable) {
+            m_decision = "hold_outmatched";
+            return;
+        }
         m_attacking = true;
         if (Learning::Spec(m_composition).rush) m_rushLaunched = true;
         Micro::SetMode(Micro::MicroMode::Aggressive);
-        MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" + std::to_string(army));
-    } else if (m_attacking && (emergency || army < threshold * m_genome.Get(Gene::RetreatFraction))) {
+        MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" + std::to_string(army) +
+            " enemy=" + std::to_string(enemyArmy / 2) + (gamble ? " close_fight" : ""));
+    } else if (m_attacking && (emergency || army < threshold * m_genome.Get(Gene::RetreatFraction) ||
+                               CombatPolicy::AttackLost(counts.armySupply, enemyArmy))) {
         m_attacking = false;
         Micro::SetMode(Micro::MicroMode::Defensive);
-        MatchLog::Event("regroup", emergency ? "base_emergency" : "army_depleted");
+        MatchLog::Event("regroup", emergency ? "base_emergency" :
+            army < threshold * m_genome.Get(Gene::RetreatFraction) ? "army_depleted" : "outmatched");
     }
 }
 

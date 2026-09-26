@@ -20,7 +20,7 @@ namespace {
         { true,  true,  {0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Hydra + Queen rush
         { true,  true,  {0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00} }, // Muta + Queen rush
         { true,  false, {0.00, 0.00, 0.20, 0.80, 0.00, 0.00, 0.00} }, // Guardian rush (Mutas are the morph source/escort)
-        { false, false, {0.00, 0.00, 0.70, 0.00, 0.30, 0.00, 0.00} }, // Mass Muta + Devourer
+        { false, false, {0.00, 0.00, 0.83, 0.00, 0.17, 0.00, 0.00} }, // Mass Muta + Devourer (5 Mutas per Devourer)
         { false, true,  {0.50, 0.00, 0.50, 0.00, 0.00, 0.00, 0.00} }, // Ling + Muta + Queen
         { false, false, {0.35, 0.00, 0.30, 0.35, 0.00, 0.00, 0.00} }, // Ling + Muta + Guardian
         { false, true,  {0.00, 0.10, 0.50, 0.00, 0.00, 0.40, 0.00} }, // Lurker + Queen + Muta

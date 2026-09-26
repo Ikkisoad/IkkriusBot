@@ -152,12 +152,22 @@ int main() {
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==0);
     ling.idle=true;
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==1);
-    // Group engagement policy: commit to winnable fights, hit-and-run close ones, withdraw from losing ones.
+    // Group engagement policy: commit to winnable fights, only rarely gamble on close ones, withdraw otherwise.
     using CombatPolicy::Engagement;
-    assert(CombatPolicy::AssessEngagement(12,10)==Engagement::Commit);
-    assert(CombatPolicy::AssessEngagement(10,12)==Engagement::HitAndRun);
-    assert(CombatPolicy::AssessEngagement(10,17)==Engagement::Withdraw);
+    assert(CombatPolicy::AssessEngagement(13,10)==Engagement::Commit);
+    assert(CombatPolicy::AssessEngagement(12,10)==Engagement::Withdraw); // Close: declined by default.
+    assert(CombatPolicy::AssessEngagement(12,10,true)==Engagement::HitAndRun); // ...unless gambling.
+    assert(CombatPolicy::AssessEngagement(10,12,true)==Engagement::Withdraw); // Losing fights are never gambled.
+    assert(CombatPolicy::AssessEngagement(10,17,true)==Engagement::Withdraw);
     assert(CombatPolicy::AssessEngagement(4,0)==Engagement::Commit);
+    int gambles=0;
+    for(int window=0;window<1000;++window) gambles+=CombatPolicy::TakeCloseFight(window*CombatPolicy::CloseFightWindowFrames);
+    assert(gambles>=80 && gambles<=220); // A low share of time windows.
+    assert(CombatPolicy::TakeCloseFight(0)==CombatPolicy::TakeCloseFight(CombatPolicy::CloseFightWindowFrames-1)); // Stable per window.
+    assert(CombatPolicy::AttackWinnable(40,0,false) && CombatPolicy::AttackWinnable(40,30,false));
+    assert(!CombatPolicy::AttackWinnable(40,35,false) && CombatPolicy::AttackWinnable(40,35,true));
+    assert(!CombatPolicy::AttackWinnable(40,50,true));
+    assert(CombatPolicy::AttackLost(20,40) && !CombatPolicy::AttackLost(40,40));
     assert(!CombatPolicy::ShouldStepBack(Engagement::Commit,true,10,100,100)); // Winning groups keep shooting.
     assert(CombatPolicy::ShouldStepBack(Engagement::HitAndRun,true,10,100,100)); // Ranged units kite between shots.
     assert(!CombatPolicy::ShouldStepBack(Engagement::HitAndRun,true,0,100,100)); // ...and return to fire when ready.
@@ -167,15 +177,27 @@ int main() {
     assert(CombatPolicy::FocusScore(0,200,128,1.0,2) < CombatPolicy::FocusScore(0,150,128,1.0,0)); // Join allies' target.
     assert(CombatPolicy::FocusScore(0,100,128,0.3,0) < CombatPolicy::FocusScore(0,100,128,1.0,0)); // Finish weak units.
     assert(CombatPolicy::FocusScore(0,128,128,1.0,0) < CombatPolicy::FocusScore(1,64,128,0.2,0)); // Threats before workers.
-    // A ranged unit in an even fight kites back between shots instead of standing still.
     FakeUnit hydra{{6,1,false,false,true,{128}},&game.player,0}, zealot{{7,2},&enemy,100};
     hydra.neighbors={&hydra,&zealot}; hydra.cooldown=10;
-    zealot.type.supply=3; // 2 vs 3 power: close enough to trade, not enough to commit.
+    zealot.type.supply=3; // 2 vs 3 power: a losing fight.
+    Micro::moved={-999};
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::moved.x==-400 && Micro::fellBackFrom==nullptr); // Withdraw from losing fights.
+    // An even fight is declined, except in a gamble window where the ranged unit kites between shots.
+    zealot.type.supply=2;
+    int gambleFrame=0, safeFrame=0;
+    while(!CombatPolicy::TakeCloseFight(gambleFrame)) gambleFrame+=CombatPolicy::CloseFightWindowFrames;
+    while(CombatPolicy::TakeCloseFight(safeFrame)) safeFrame+=CombatPolicy::CloseFightWindowFrames;
+    game.frame=safeFrame; Micro::moved={-999};
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::moved.x==-400 && Micro::fellBackFrom==nullptr);
+    game.frame=gambleFrame;
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::fellBackFrom==&zealot);
     hydra.cooldown=0; Micro::attacked=nullptr;
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::attacked==&zealot);
+    game.frame=100;
     std::cout << "Ground combat and Lurker regressions passed.\n";
 }
 """

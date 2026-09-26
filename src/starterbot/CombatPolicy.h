@@ -16,13 +16,34 @@ namespace CombatPolicy {
         return true;
     }
 
+    // Fights are taken when clearly winnable. Close fights are declined, except for a small
+    // share of time windows where the whole army gambles on them together.
+    constexpr double WinningRatio = 1.3;    // Our power over theirs needed to commit.
+    constexpr double CloseFightRatio = 0.9; // Below this the fight is lost; withdraw.
+    constexpr int CloseFightWindowFrames = 24 * 15;
+    constexpr int CloseFightChancePercent = 15;
+    // Deterministic per window, so every unit makes the same call and the army does not split.
+    inline bool TakeCloseFight(int frame) {
+        const unsigned window = static_cast<unsigned>(std::max(0, frame) / CloseFightWindowFrames);
+        return (window * 2654435761u >> 16) % 100 < static_cast<unsigned>(CloseFightChancePercent);
+    }
+
     // Local fight evaluation: units commit together when the nearby group wins the trade,
-    // hit-and-run when it is close, and only withdraw when clearly outmatched.
+    // hit-and-run through a close fight only when gambling on it, and otherwise withdraw.
     enum class Engagement { Commit, HitAndRun, Withdraw };
-    inline Engagement AssessEngagement(double friendlyPower, double enemyPower) {
-        if (enemyPower <= 0 || friendlyPower >= enemyPower * 1.2) return Engagement::Commit;
-        if (enemyPower > friendlyPower * 1.6) return Engagement::Withdraw;
-        return Engagement::HitAndRun;
+    inline Engagement AssessEngagement(double friendlyPower, double enemyPower, bool takeCloseFight = false) {
+        if (enemyPower <= 0 || friendlyPower >= enemyPower * WinningRatio) return Engagement::Commit;
+        if (takeCloseFight && friendlyPower >= enemyPower * CloseFightRatio) return Engagement::HitAndRun;
+        return Engagement::Withdraw;
+    }
+    // Army-level attack decision on the enemy army we have scouted (both in BWAPI supply units).
+    inline bool AttackWinnable(int armySupply, int knownEnemySupply, bool takeCloseFight) {
+        if (knownEnemySupply <= 0) return true;
+        return armySupply >= knownEnemySupply * (takeCloseFight ? CloseFightRatio : WinningRatio);
+    }
+    // Abandon an attack once the scouted enemy army clearly outweighs ours.
+    inline bool AttackLost(int armySupply, int knownEnemySupply) {
+        return knownEnemySupply > 0 && armySupply * WinningRatio < knownEnemySupply;
     }
     // Step back only between shots or when badly hurt, so the group keeps its damage on target.
     inline bool ShouldStepBack(Engagement engagement, bool ranged, int cooldown, int hitPoints, int maxHitPoints) {
@@ -41,15 +62,22 @@ namespace CombatPolicy {
     inline int QueenTarget(int hydraGroups, int airCombatUnits) {
         return hydraGroups + (airCombatUnits > 0 ? (airCombatUnits + 15) / 16 : 0);
     }
+    // Devourers are support: one per five Mutalisks, fighting inside the Mutalisk flock.
+    constexpr int MutalisksPerDevourer = 5;
+    inline int DevourerTarget(int mutalisks) { return std::max(0, mutalisks) / MutalisksPerDevourer; }
+    inline bool WantDevourer(int mutalisks, int devourers) {
+        // Morphing consumes a Mutalisk, so check the ratio still holds afterwards.
+        return devourers < DevourerTarget(mutalisks - 1);
+    }
+
     enum class AirMorph { None, Guardian, Devourer };
     inline AirMorph NextAirMorph(int mutalisks, int guardians, int devourers, int enemyAirSupply) {
         // Keep an escort/harassment flock rather than converting all mobile anti-air.
         if (mutalisks <= 8) return AirMorph::None;
-        const int targetDevourers = enemyAirSupply > 0 ? std::clamp((enemyAirSupply + 7) / 8, 2, 6) : 1;
         const int targetGuardians = std::clamp((mutalisks + guardians + devourers) / 2, 4, 12);
-        if (enemyAirSupply > 0 && devourers < targetDevourers) return AirMorph::Devourer;
+        if (enemyAirSupply > 0 && WantDevourer(mutalisks, devourers)) return AirMorph::Devourer;
         if (guardians < targetGuardians) return AirMorph::Guardian;
-        if (devourers < targetDevourers) return AirMorph::Devourer;
+        if (WantDevourer(mutalisks, devourers)) return AirMorph::Devourer;
         return AirMorph::None;
     }
 

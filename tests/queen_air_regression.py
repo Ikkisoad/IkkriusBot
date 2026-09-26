@@ -24,6 +24,7 @@ namespace BWAPI {
 struct Position {
     int x=0, y=0;
     int getApproxDistance(Position other) const { return int(std::hypot(x-other.x,y-other.y)); }
+    bool isValid() const { return true; }
 };
 struct TechType {
     int id=0;
@@ -174,13 +175,21 @@ int main() {
     devourer.neighbors={&marine1}; Micro::attacked=nullptr;
     Micro::DevourerEscortLoop(&devourer,{200,0});
     assert(Micro::attacked==nullptr && Micro::moves==1);
+    FakeUnit farAir{{31},&enemy,32,{-300,0}}; farAir.flying=true;
+    devourer.neighbors={&farAir};
+    Micro::DevourerEscortLoop(&devourer,{200,0});
+    assert(Micro::attacked==nullptr && Micro::moves==2); // Never peel off from the Mutalisks alone.
 
     using CombatPolicy::AirMorph;
     assert(CombatPolicy::NextAirMorph(8,0,0,32)==AirMorph::None);
     assert(CombatPolicy::NextAirMorph(12,0,0,0)==AirMorph::Guardian);
     assert(CombatPolicy::NextAirMorph(12,0,0,16)==AirMorph::Devourer);
     assert(CombatPolicy::NextAirMorph(12,12,0,0)==AirMorph::Devourer);
-    assert(CombatPolicy::NextAirMorph(12,12,1,0)==AirMorph::None);
+    assert(CombatPolicy::NextAirMorph(12,12,1,0)==AirMorph::Devourer); // One Devourer per five Mutalisks.
+    assert(CombatPolicy::NextAirMorph(12,12,2,0)==AirMorph::None);
+    assert(CombatPolicy::DevourerTarget(10)==2 && CombatPolicy::DevourerTarget(4)==0);
+    assert(!CombatPolicy::WantDevourer(5,0) && CombatPolicy::WantDevourer(6,0)); // Five Mutalisks must remain.
+    assert(!CombatPolicy::WantDevourer(10,1) && CombatPolicy::WantDevourer(11,1));
     assert(CombatPolicy::NextAirMorph(20,12,6,100)==AirMorph::None);
     std::cout << "Queen spells, Hydra groups, Devourer orders and air composition passed.\n";
 }

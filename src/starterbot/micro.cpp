@@ -362,7 +362,8 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
     // --- Group decision: fight together when the local battle is winnable, hit-and-run when close ---
     const auto fight = AssessLocalFight(unit, 320);
     const auto engagement = alwaysAvoid ? CombatPolicy::Engagement::Withdraw
-                                        : CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower);
+                                        : CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower,
+                                              CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
     if (closestLethal && !cantFlee) {
         const bool ranged = unit->getType().groundWeapon().maxRange() > 32;
         const int cooldown = unit->getGroundWeaponCooldown();
@@ -949,7 +950,8 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
     }
     // Focus fire with the nearby group rather than each unit taking its nearest enemy.
     if (!defending) target = ChooseFocusTarget(unit, candidates, false);
-    const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower);
+    const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower,
+        CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
     if (!defending && engagement == CombatPolicy::Engagement::Withdraw) {
         SmartMove(unit, rally);
         return;
@@ -1179,9 +1181,12 @@ void Micro::LurkerSupportLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, B
 }
 
 void Micro::DevourerEscortLoop(BWAPI::Unit unit, BWAPI::Position escort) {
+    // Devourers support the Mutalisk flock: only engage air the flock is fighting too, never alone.
+    constexpr int FlockReach = 320;
     BWAPI::Unit target = nullptr;
     for (auto enemy : unit->getUnitsInRadius(384, BWAPI::Filter::IsEnemy)) {
         if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !enemy->isFlying() || !unit->canAttack(enemy)) continue;
+        if (escort.isValid() && enemy->getPosition().getApproxDistance(escort) > FlockReach) continue;
         if (!target || unit->getDistance(enemy) < unit->getDistance(target)) target = enemy;
     }
     // Attack first: issuing an escort move first prevents the attack in the same frame.
@@ -1212,6 +1217,9 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
     const auto center = UnitCenter(combat, rally);
     // Without an air group, free Queens and Devourers follow the main army instead of idling at home.
     const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, center);
+    // Devourers fly with the Mutalisks (the raid squad when it holds every Mutalisk).
+    const auto flockCenter = !mutalisks.empty() ? UnitCenter(mutalisks, center) :
+        !raid.raiders.empty() ? raid.center : airCenter;
     const auto groups = GetHydraGroups(myUnits);
     const bool queenNestReady = Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Queens_Nest) > 0;
     std::map<int, BWAPI::Position> hydraCenters, queenEscorts;
@@ -1296,7 +1304,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
         } else if (type == BWAPI::UnitTypes::Zerg_Mutalisk || type == BWAPI::UnitTypes::Zerg_Guardian || type == BWAPI::UnitTypes::Zerg_Devourer) {
             if (DefendBases(unit, threats)) continue;
             if (GetMode() != MicroMode::Aggressive) { SmartMove(unit, rally); continue; }
-            if (type == BWAPI::UnitTypes::Zerg_Devourer) DevourerEscortLoop(unit, airCenter);
+            if (type == BWAPI::UnitTypes::Zerg_Devourer) DevourerEscortLoop(unit, flockCenter);
             else if (type == BWAPI::UnitTypes::Zerg_Guardian)
                 GuardianAssaultLoop(unit, BWAPI::Broodwar->getAllUnits(), UnitCenter(devourers.empty() ? mutalisks : devourers, rally));
             else if (unit->getDistance(UnitCenter(mutalisks, rally)) > 256 && unit->getUnitsInRadius(224, BWAPI::Filter::IsEnemy).empty())
@@ -1335,7 +1343,8 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
 
     // Workers first while harassing, but the whole flock converges on one target.
     const auto fight = AssessLocalFight(muta, 288);
-    const auto engagement = CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower);
+    const auto engagement = CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower,
+        CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
     BWAPI::Unit bestTarget = ChooseFocusTarget(muta, candidates, engagement != CombatPolicy::Engagement::Commit);
 
     const int cooldown = bestTarget && bestTarget->isFlying() ? muta->getAirWeaponCooldown() : muta->getGroundWeaponCooldown();

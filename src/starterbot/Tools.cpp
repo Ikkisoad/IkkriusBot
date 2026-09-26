@@ -127,6 +127,8 @@ bool IsNearDepot(BWAPI::Unit mineral, const BWAPI::Unitset& depots) {
     }
     return false;
 }
+
+constexpr int WorkersPerPatch = 2; // A third miner on a patch only waits in line.
 }
 
 BWAPI::Unit Tools::GetMineralForWorker(BWAPI::Unit worker) {
@@ -153,7 +155,7 @@ BWAPI::Unit Tools::GetMineralForWorker(BWAPI::Unit worker) {
         }
         if (minerals.empty()) continue;
         // Prefer the nearest base that still has room; walking once beats mining far away forever.
-        const bool saturated = assigned >= static_cast<int>(minerals.size()) * 2;
+        const bool saturated = assigned >= static_cast<int>(minerals.size()) * WorkersPerPatch;
         const int distance = worker->getDistance(depot);
         if (!bestDepot || (bestSaturated && !saturated) || (saturated == bestSaturated && distance < bestDistance)) {
             bestDepot = depot;
@@ -179,12 +181,32 @@ BWAPI::Unit Tools::GetMineralForWorker(BWAPI::Unit worker) {
         return fallback;
     }
 
+    // Every base is full: leave the worker free to expand or build instead of oversaturating.
+    if (bestSaturated) return nullptr;
+
     BWAPI::Unit best = nullptr;
     for (auto mineral : bestMinerals) {
         if (!best || miners[mineral] < miners[best] ||
             (miners[mineral] == miners[best] && mineral->getDistance(bestDepot) < best->getDistance(bestDepot))) best = mineral;
     }
     return best;
+}
+
+Tools::MiningCapacity Tools::GetMiningCapacity() {
+    MiningCapacity capacity;
+    const auto depots = UsableDepots();
+    BWAPI::Unitset patches;
+    for (auto mineral : BWAPI::Broodwar->getMinerals()) {
+        if (mineral->getResources() > 0 && IsNearDepot(mineral, depots)) patches.insert(mineral);
+    }
+    capacity.mineralSlots = static_cast<int>(patches.size()) * WorkersPerPatch;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (!unit->getType().isWorker() || !unit->isCompleted()) continue;
+        const auto target = MiningTarget(unit);
+        if (target && patches.contains(target) && unit->isGatheringMinerals()) ++capacity.mineralWorkers;
+        else if (unit->isIdle() && !HasPendingConstruction(unit)) ++capacity.idleWorkers;
+    }
+    return capacity;
 }
 
 bool Tools::GatherNearestBaseMinerals(BWAPI::Unit worker) {
@@ -207,6 +229,8 @@ void Tools::FixLongDistanceMining() {
         if (!target || IsNearDepot(target, depots)) continue;
         const auto replacement = GetMineralForWorker(worker);
         if (replacement && replacement != target && IsNearDepot(replacement, depots)) worker->gather(replacement);
+        // No room at home: stop and wait as a free builder rather than long-distance mining.
+        else if (!replacement) worker->stop();
     }
 }
 
@@ -239,12 +263,23 @@ void Tools::GatherGas(BWAPI::Unit extractor, int targetWorkers) {
     }
 }
 
+static BWAPI::TilePosition FindClearBuildTile(BWAPI::UnitType type, BWAPI::TilePosition startTile,
+                                              int maxBuildRange, BWAPI::Unit builder, bool buildingOnCreep);
+
 bool Tools::BuildMacroHatchery() {
     if (IsQueued(BWAPI::UnitTypes::Zerg_Hatchery).isValid()) return false;
-    const auto position = BWAPI::Broodwar->getBuildLocation(BWAPI::UnitTypes::Zerg_Hatchery,
-        BWAPI::Broodwar->self()->getStartLocation(), 12, false);
+    const auto type = BWAPI::UnitTypes::Zerg_Hatchery;
+    if (BWAPI::Broodwar->self()->minerals() - GetConstructionReserve().first < type.mineralPrice()) return false;
+    // Same clear-path search as other buildings: a macro Hatchery must not land in a mineral line.
+    BWAPI::Unit builder = nullptr;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit->getType().isWorker() && unit->isCompleted() && !HasPendingConstruction(unit) &&
+            (!builder || (unit->isIdle() && !builder->isIdle()))) builder = unit;
+    }
+    if (!builder) return false;
+    const auto position = FindClearBuildTile(type, BWAPI::Broodwar->self()->getStartLocation(), 14, builder, false);
     if (!position.isValid()) return false;
-    return TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, position);
+    return TryBuildBuilding(type, 1, position);
 }
 
 bool Tools::EnsureBaseGas(BWAPI::Unit depot) {
@@ -265,17 +300,25 @@ bool Tools::EnsureBaseGas(BWAPI::Unit depot) {
 }
 
 bool Tools::EnsureGroundDefense(BWAPI::Unit depot, int target) {
+    return EnsureStaticDefense(depot, target, BWAPI::UnitTypes::Zerg_Sunken_Colony);
+}
+
+bool Tools::EnsureStaticDefense(BWAPI::Unit depot, int target, BWAPI::UnitType finalType) {
     if (!depot || !depot->isCompleted() || CountUnitOfType(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) return false;
+    // Spores need an Evolution Chamber; fall back to a Sunken rather than leaving a bare colony.
+    if (finalType == BWAPI::UnitTypes::Zerg_Spore_Colony && CountUnitOfType(BWAPI::UnitTypes::Zerg_Evolution_Chamber) == 0)
+        finalType = BWAPI::UnitTypes::Zerg_Sunken_Colony;
     int colonies = 0;
     for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
         if (unit->getDistance(depot) > 256) continue;
-        if (unit->getType() == BWAPI::UnitTypes::Zerg_Creep_Colony) {
+        const auto type = unit->getType();
+        if (type == BWAPI::UnitTypes::Zerg_Creep_Colony) {
             ++colonies;
-            if (unit->isCompleted()) return MorphUnit(unit, BWAPI::UnitTypes::Zerg_Sunken_Colony);
-        } else if (unit->getType() == BWAPI::UnitTypes::Zerg_Sunken_Colony) ++colonies;
+            if (unit->isCompleted()) return MorphUnit(unit, finalType);
+        } else if (type == BWAPI::UnitTypes::Zerg_Sunken_Colony || type == BWAPI::UnitTypes::Zerg_Spore_Colony) ++colonies;
     }
     if (colonies >= target || IsQueued(BWAPI::UnitTypes::Zerg_Creep_Colony).isValid() ||
-        BWAPI::Broodwar->self()->minerals() < 125) return false;
+        BWAPI::Broodwar->self()->minerals() < 75 + finalType.mineralPrice()) return false;
     const bool accepted = BuildBuildingOptimal(BWAPI::UnitTypes::Zerg_Creep_Colony, depot->getTilePosition());
     MatchLog::Command("base_defense", "Zerg Creep Colony", accepted);
     return accepted;
@@ -301,7 +344,7 @@ void Tools::BalanceMineralWorkers() {
             const auto target = worker->getLastCommand().getTarget();
             if (target && minerals.count(target)) ++assigned;
         }
-        if (assigned >= static_cast<int>(minerals.size()) * 2) continue;
+        if (assigned >= static_cast<int>(minerals.size()) * WorkersPerPatch) continue;
         for (auto worker : units) {
             if (!worker->getType().isWorker() || !worker->isGatheringMinerals() ||
                 worker->isCarryingMinerals() || worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) continue;
@@ -453,6 +496,7 @@ static bool BlocksResourceGathering(const BWAPI::TilePosition& tile, BWAPI::Unit
     const int left = tile.x, top = tile.y;
     const int right = left + type.tileWidth(), bottom = top + type.tileHeight();
     const int maxCorridor = 12; // Resources farther than this belong to another base.
+    const int padding = 1;      // Keep the tiles around the corridor free too, so drones can path around the edges.
 
     auto blocks = [&](const BWAPI::TilePosition& depotTile, BWAPI::UnitType depotType,
                       const BWAPI::TilePosition& resourceTile, BWAPI::UnitType resourceType) {
@@ -461,7 +505,7 @@ static bool BlocksResourceGathering(const BWAPI::TilePosition& tile, BWAPI::Unit
         const int boxRight = std::max(depotTile.x + depotType.tileWidth(), resourceTile.x + resourceType.tileWidth());
         const int boxBottom = std::max(depotTile.y + depotType.tileHeight(), resourceTile.y + resourceType.tileHeight());
         if (boxRight - boxLeft > maxCorridor || boxBottom - boxTop > maxCorridor) return false;
-        return left < boxRight && right > boxLeft && top < boxBottom && bottom > boxTop;
+        return left < boxRight + padding && right > boxLeft - padding && top < boxBottom + padding && bottom > boxTop - padding;
     };
 
     for (auto& depot : BWAPI::Broodwar->self()->getUnits()) {
@@ -507,13 +551,15 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
     // Get the type of unit that is required to build the desired building
     BWAPI::UnitType builderType = type.whatBuilds().first;
     BWAPI::Unit builder = nullptr;
-    // Find the closest available builder to the desired position
+    // Find the closest available builder to the desired position. Idle workers (the surplus
+    // left over once every patch is saturated) go first so builds do not pull active miners.
     int minDist = std::numeric_limits<int>::max();
     for (auto& unit : BWAPI::Broodwar->self()->getUnits()) {
         if (unit->getType() == builderType && unit->isCompleted() && !unit->isConstructing() &&
             !unit->isMorphing() && unit->getLastCommandFrame() < BWAPI::Broodwar->getFrameCount() &&
             !HasPendingConstruction(unit)) {
-            int dist = unit->getDistance(BWAPI::Position(desiredPos));
+            const bool spare = unit->getType().isWorker() && unit->isIdle();
+            int dist = unit->getDistance(BWAPI::Position(desiredPos)) + (spare ? 0 : 100000);
             if (dist < minDist) {
                 minDist = dist;
                 builder = unit;
@@ -530,17 +576,18 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
             return Tools::MorphUnit(builder, type);
         }
 
-        int maxBuildRange = type == BWAPI::UnitTypes::Zerg_Creep_Colony ? 6 : 16;
+        // Colonies must stay within the base they defend; other buildings may spread out.
+        const bool colony = type == BWAPI::UnitTypes::Zerg_Creep_Colony;
         // Search around the requested base, avoiding mining paths. Widen the search before
         // giving up so a crowded base does not push the building into the mineral line.
-        BWAPI::TilePosition bestPos = FindClearBuildTile(type, desiredPos, maxBuildRange, builder, buildingOnCreep);
-        if (!bestPos.isValid() && maxBuildRange < 20) {
-            bestPos = FindClearBuildTile(type, desiredPos, 20, builder, buildingOnCreep);
+        const std::vector<int> ranges = colony ? std::vector<int>{ 6, 8 } : std::vector<int>{ 16, 24, 32 };
+        BWAPI::TilePosition bestPos = BWAPI::TilePositions::Invalid;
+        for (int range : ranges) {
+            bestPos = FindClearBuildTile(type, desiredPos, range, builder, buildingOnCreep);
+            if (bestPos.isValid()) break;
         }
-
-        if (bestPos.isValid()) {
-            return builder->build(type, bestPos);
-        }
+        // No clear tile: skip this build rather than blocking a mineral line.
+        return bestPos.isValid() && builder->build(type, bestPos);
     } else {
         // A scouting move is not a successful construction order. Retry on later frames.
         if (!BWAPI::Broodwar->isExplored(desiredPos)) {
@@ -549,14 +596,6 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
         }
         return builder->build(type, desiredPos);
     }
-
-    // Fallback: use BWAPI's default search if no optimal found
-    const BWAPI::TilePosition fallback = BWAPI::Broodwar->getBuildLocation(type, desiredPos, 64, buildingOnCreep); // Mark fallback as const to fix C26496
-    if (fallback.isValid()) {
-        return builder->build(type, fallback);
-    }
-
-    return false;
 }
 
 void Tools::DrawUnitCommands()

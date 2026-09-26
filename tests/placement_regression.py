@@ -74,6 +74,7 @@ int main() {
     assert(BlocksResourceGathering({16,20},pool)); // Between hatchery and minerals.
     assert(BlocksResourceGathering({21,16},colony)); // Between hatchery and geyser.
     assert(BlocksResourceGathering({13,20},colony)); // Inside the mineral line.
+    assert(BlocksResourceGathering({16,16},colony)); // Hugging the edge of the mining corridor.
     assert(!BlocksResourceGathering({27,20},pool)); // Behind the hatchery.
     assert(!BlocksResourceGathering({20,25},pool)); // Below the hatchery, off every path.
     assert(!BlocksResourceGathering({58,58},pool)); // Minerals with no base of ours.

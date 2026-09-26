@@ -71,5 +71,7 @@ private:
     void Upgrades(const Counts& counts);
     void MorphAdvancedUnits(const Counts& counts);
     void SpendArmyBudget(const Counts& counts);
+    void SpendExcessMinerals(const Counts& counts, bool emergency);
+    int KnownEnemyArmySupply() const;
     void ManageAttack(const Counts& counts, bool emergency);
 };

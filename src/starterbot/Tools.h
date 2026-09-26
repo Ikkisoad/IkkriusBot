@@ -14,13 +14,18 @@ namespace Tools
     int CountUnitOfType(BWAPI::UnitType type);
     void Scout(BWAPI::Unit scout);
     void BalanceMineralWorkers();
+    // Returns nullptr when every base already has two miners per patch.
     BWAPI::Unit GetMineralForWorker(BWAPI::Unit worker);
+    struct MiningCapacity { int mineralSlots = 0, mineralWorkers = 0, idleWorkers = 0; };
+    MiningCapacity GetMiningCapacity();
     bool GatherNearestBaseMinerals(BWAPI::Unit worker);
     void FixLongDistanceMining();
     void GatherGas(BWAPI::Unit extractor, int targetWorkers = 3);
     bool BuildMacroHatchery();
     bool EnsureBaseGas(BWAPI::Unit depot);
     bool EnsureGroundDefense(BWAPI::Unit depot, int target);
+    // Creep Colonies at a base, morphed into `finalType` (Sunken or Spore) once complete.
+    bool EnsureStaticDefense(BWAPI::Unit depot, int target, BWAPI::UnitType finalType);
     BWAPI::Unit GetDepot();
 
     bool TryBuildBuilding(BWAPI::UnitType building, int limitAmount, BWAPI::TilePosition desiredPos);
