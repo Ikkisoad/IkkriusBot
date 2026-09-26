@@ -330,24 +330,57 @@ bool Tools::BuildBuilding(BWAPI::UnitType type, BWAPI::TilePosition desiredPos =
     return builder->build(type, buildPos);
 }
 
-// Helper: Checks if a tile is near any mineral patch or hatchery
-static bool IsNearMiningPath(const BWAPI::TilePosition& tile, int buffer = 2) {
-    for (auto& mineral : BWAPI::Broodwar->getMinerals()) {
-        if (!mineral->exists()) continue;
-        BWAPI::TilePosition mineralTile = mineral->getTilePosition();
-        if (BWAPI::Position(tile).getApproxDistance(BWAPI::Position(mineralTile)) < buffer * 32)
-            return true;
-    }
-    for (auto& unit : BWAPI::Broodwar->self()->getUnits()) {
-        if (unit->getType() == BWAPI::UnitTypes::Zerg_Hatchery ||
-            unit->getType() == BWAPI::UnitTypes::Zerg_Lair ||
-            unit->getType() == BWAPI::UnitTypes::Zerg_Hive) {
-            BWAPI::TilePosition hatchTile = unit->getTilePosition();
-            if (BWAPI::Position(tile).getApproxDistance(BWAPI::Position(hatchTile)) < buffer * 32)
-                return true;
+// Helper: Checks if a building footprint would sit between one of our resource depots and its
+// minerals or geysers. Workers walk that corridor, so anything placed there slows gathering.
+static bool BlocksResourceGathering(const BWAPI::TilePosition& tile, BWAPI::UnitType type) {
+    if (type.isRefinery()) return false; // Extractors must go on the geyser itself.
+    const int left = tile.x, top = tile.y;
+    const int right = left + type.tileWidth(), bottom = top + type.tileHeight();
+    const int maxCorridor = 12; // Resources farther than this belong to another base.
+
+    auto blocks = [&](const BWAPI::TilePosition& depotTile, BWAPI::UnitType depotType,
+                      const BWAPI::TilePosition& resourceTile, BWAPI::UnitType resourceType) {
+        const int boxLeft = std::min(depotTile.x, resourceTile.x);
+        const int boxTop = std::min(depotTile.y, resourceTile.y);
+        const int boxRight = std::max(depotTile.x + depotType.tileWidth(), resourceTile.x + resourceType.tileWidth());
+        const int boxBottom = std::max(depotTile.y + depotType.tileHeight(), resourceTile.y + resourceType.tileHeight());
+        if (boxRight - boxLeft > maxCorridor || boxBottom - boxTop > maxCorridor) return false;
+        return left < boxRight && right > boxLeft && top < boxBottom && bottom > boxTop;
+    };
+
+    for (auto& depot : BWAPI::Broodwar->self()->getUnits()) {
+        if (!depot->getType().isResourceDepot()) continue;
+        for (auto& mineral : BWAPI::Broodwar->getStaticMinerals()) {
+            if (blocks(depot->getTilePosition(), depot->getType(), mineral->getInitialTilePosition(), mineral->getInitialType())) return true;
+        }
+        for (auto& geyser : BWAPI::Broodwar->getStaticGeysers()) {
+            if (blocks(depot->getTilePosition(), depot->getType(), geyser->getInitialTilePosition(), geyser->getInitialType())) return true;
         }
     }
     return false;
+}
+
+// Helper: Finds the buildable tile closest to the builder that keeps mining paths clear
+static BWAPI::TilePosition FindClearBuildTile(BWAPI::UnitType type, BWAPI::TilePosition startTile,
+                                              int maxBuildRange, BWAPI::Unit builder, bool buildingOnCreep) {
+    BWAPI::TilePosition bestPos = BWAPI::TilePositions::Invalid;
+    int bestDist = std::numeric_limits<int>::max();
+
+    for (int dx = -maxBuildRange; dx <= maxBuildRange; ++dx) {
+        for (int dy = -maxBuildRange; dy <= maxBuildRange; ++dy) {
+            BWAPI::TilePosition candidate = startTile + BWAPI::TilePosition(dx, dy);
+            if (!candidate.isValid()) continue;
+            if (!BWAPI::Broodwar->canBuildHere(candidate, type, builder, buildingOnCreep)) continue;
+            if (BlocksResourceGathering(candidate, type)) continue; // Avoid mining path
+
+            int dist = builder->getDistance(BWAPI::Position(candidate));
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestPos = candidate;
+            }
+        }
+    }
+    return bestPos;
 }
 
 bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desiredPos) {
@@ -382,25 +415,11 @@ bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desir
         }
 
         int maxBuildRange = type == BWAPI::UnitTypes::Zerg_Creep_Colony ? 6 : 16;
-        BWAPI::TilePosition startTile = desiredPos;
-
-        // Search around the requested base, avoiding mining paths
-        BWAPI::TilePosition bestPos = BWAPI::TilePositions::Invalid;
-        int bestDist = std::numeric_limits<int>::max();
-
-        for (int dx = -maxBuildRange; dx <= maxBuildRange; ++dx) {
-            for (int dy = -maxBuildRange; dy <= maxBuildRange; ++dy) {
-                BWAPI::TilePosition candidate = startTile + BWAPI::TilePosition(dx, dy);
-                if (!candidate.isValid()) continue;
-                if (!BWAPI::Broodwar->canBuildHere(candidate, type, builder, buildingOnCreep)) continue;
-                if (IsNearMiningPath(candidate, 2)) continue; // Avoid mining path
-
-                int dist = builder->getDistance(BWAPI::Position(candidate));
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestPos = candidate;
-                }
-            }
+        // Search around the requested base, avoiding mining paths. Widen the search before
+        // giving up so a crowded base does not push the building into the mineral line.
+        BWAPI::TilePosition bestPos = FindClearBuildTile(type, desiredPos, maxBuildRange, builder, buildingOnCreep);
+        if (!bestPos.isValid() && maxBuildRange < 20) {
+            bestPos = FindClearBuildTile(type, desiredPos, 20, builder, buildingOnCreep);
         }
 
         if (bestPos.isValid()) {
