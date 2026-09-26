@@ -25,6 +25,10 @@ namespace Learning {
         LingQueenUltra,
         HydraQueenUltra,
         ScourgeQueenUltra,
+        // Early all-ins: see AllInPlan.
+        GuardianAllIn,
+        MutaAllIn,
+        LurkerAllIn,
         Count
     };
     constexpr int CompositionCount = static_cast<int>(Composition::Count);
@@ -42,6 +46,19 @@ namespace Learning {
         double Share(Army army) const { return share[static_cast<int>(army)]; }
     };
     const CompositionSpec& Spec(Composition composition);
+
+    // Early all-ins: the fastest path to one key unit on a capped economy, gas saved for that tech alone,
+    // the army held back until enough key units are out, then everything attacks together and keeps
+    // attacking, to land before the enemy has the tech or army to defend against it.
+    // All-ins are only chosen at the opening; mid-match switching never picks one.
+    struct AllInPlan {
+        bool active = false;
+        int droneCap = 0;           // Drones stop here; every other mineral goes into tech and army.
+        int extractors = 0;         // Geysers taken before the attack (Guardians need two).
+        Army key = Army::Count;     // The unit the attack waits for...
+        int keyCount = 0;           // ...and how many of it.
+    };
+    const AllInPlan& AllIn(Composition composition);
 
     // Enemy tech features, each roughly in [0, 1].
     enum class Feature { Air, AntiAir, Splash, AirSplash, Heavy, Small, StaticDefense, CapitalAir, Detection, Early, Count };

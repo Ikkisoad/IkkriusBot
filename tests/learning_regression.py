@@ -130,6 +130,29 @@ int main() {
     const auto withoutTech = switcher.Choose(ContextKey("Terran", mixed), mixed, noTech, true, Composition::LingMutaQueen, 400, false);
     assert(withTech.scores[int(Composition::LurkerQueenMuta)] > withoutTech.scores[int(Composition::LurkerQueenMuta)]);
 
+    // Early all-ins: complete plans, learnable at the opening, never switched into mid-match.
+    int allIns = 0;
+    for (int i = 0; i < CompositionCount; ++i) {
+        const auto& plan = AllIn(Composition(i));
+        if (!plan.active) continue;
+        ++allIns;
+        assert(Spec(Composition(i)).rush && plan.droneCap >= 12 && plan.extractors >= 1 && plan.keyCount > 0);
+        assert(plan.key != Army::Count && Spec(Composition(i)).Share(plan.key) > 0);
+    }
+    assert(allIns == 3 && AllIn(Composition::GuardianAllIn).key == Army::Guardian);
+    assert(!AllIn(Composition::GuardianRush).active);
+    Learner allIn(9);
+    allIn.BeginGame(false);
+    const auto walled = Profile({{Feature::StaticDefense, 1.0}, {Feature::Heavy, 0.6}});
+    const int walledContext = ContextKey("Terran", walled);
+    for (int game = 0; game < 30; ++game) allIn.GetBandit().Update(walledContext, Composition::GuardianAllIn, 1.0, 1.0);
+    assert(allIn.Choose(walledContext, walled, noTech, false, Composition::LingMutaQueen, 0, true).composition == Composition::GuardianAllIn);
+    const auto midMatch = allIn.Choose(walledContext, walled, noTech, true, Composition::LingMutaQueen, 400, false);
+    assert(!AllIn(midMatch.composition).active);
+    // A launched all-in is left for a macro plan once the cooldown allows.
+    const auto after = allIn.Choose(walledContext, walled, noTech, true, Composition::GuardianAllIn, 400, false);
+    assert(!after.switched || !AllIn(after.composition).active);
+
     // Credit is shared by the time each composition was active.
     Learner credit(5);
     credit.BeginGame();
@@ -207,8 +230,8 @@ int main() {
 
 with tempfile.TemporaryDirectory() as tmp:
     directory = Path(tmp)
-    (directory / 'learning.cpp').write_text(checks)
-    sources = ['learning.cpp', str(LEARNING / 'Learning.cpp')]
+    (directory / 'lrtest.cpp').write_text(checks)
+    sources = ['lrtest.cpp', str(LEARNING / 'Learning.cpp')]
     if shutil.which('cl'):
         subprocess.run(['cl', '/nologo', '/EHsc', '/std:c++20', '/I' + str(LEARNING), *sources, '/Fe:learning.exe'],
                        cwd=directory, check=True)

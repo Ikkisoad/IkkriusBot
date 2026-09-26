@@ -12,7 +12,7 @@ namespace {
     const char* compositionNames[CompositionCount] = {
         "ZerglingQueenRush", "HydraQueenRush", "MutaQueenRush", "GuardianRush", "MassMutaDevourer",
         "LingMutaQueen", "LingMutaGuardian", "LurkerQueenMuta", "LingQueenUltra",
-        "HydraQueenUltra", "ScourgeQueenUltra"
+        "HydraQueenUltra", "ScourgeQueenUltra", "GuardianAllIn", "MutaAllIn", "LurkerAllIn"
     };
 
     //                          Ling  Hydra Muta  Guard Devour Lurker Ultra Scourge
@@ -28,6 +28,17 @@ namespace {
         { false, true,  {0.50, 0.00, 0.00, 0.00, 0.00, 0.00, 0.50, 0.00} }, // Ling + Queen + Ultralisk
         { false, true,  {0.00, 0.55, 0.00, 0.00, 0.00, 0.00, 0.45, 0.00} }, // Hydra + Queen + Ultralisk: ranged anti-air plus tanks vs heavy air
         { false, true,  {0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.65, 0.35} }, // Scourge + Queen + Ultralisk: cheap air snipers plus tanks vs heavy air
+        { true,  false, {0.00, 0.00, 0.20, 0.80, 0.00, 0.00, 0.00, 0.00} }, // Guardian all-in: fastest Guardians, Mutas as source/escort
+        { true,  false, {0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Muta all-in: one-gas Mutalisk flock
+        { true,  false, {0.30, 0.10, 0.00, 0.00, 0.00, 0.60, 0.00, 0.00} }, // Lurker all-in: fast Lurkers with Zerglings
+    };
+
+    //                                 droneCap extractors key            keyCount
+    const AllInPlan allInPlans[CompositionCount] = {
+        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        { true, 20, 2, Army::Guardian, 4 },
+        { true, 16, 1, Army::Mutalisk, 9 },
+        { true, 16, 1, Army::Lurker,   4 },
     };
 
     // Bias followed by one weight per Feature:
@@ -44,6 +55,9 @@ namespace {
         { 0.20, -0.6,  0.3,  0.2,  0.2,  0.3,  0.5,  0.1, -0.6,  0.0, -0.50 },
         { 0.15,  0.5, -0.3, -0.3, -0.3,  0.0, -0.2, -0.2, -0.3, -0.2, -0.20 }, // Hydra/Queen/Ultra: ranged AA + tanks, weak to splash
         { 0.10,  0.7, -0.2, -0.2, -0.6,  0.1,  0.0, -0.1,  0.3, -0.1, -0.40 }, // Scourge/Queen/Ultra: strong vs air incl. capital ships, dies to air splash
+        { 0.10, -0.9, -0.5,  0.3, -0.3,  0.4,  0.1,  0.5, -0.6,  0.0,  0.25 }, // Guardian all-in: outranges static defense and slow ground, dies to anti-air
+        { 0.15, -0.4, -0.8,  0.2, -0.9,  0.3,  0.0, -0.4, -0.4,  0.0,  0.25 }, // Muta all-in: beats ground armies without anti-air
+        { 0.15, -0.3,  0.1, -0.1, -0.2, -0.3,  0.6, -0.2, -0.3, -0.8,  0.20 }, // Lurker all-in: shreds small units, stopped by detection
     };
 
     const GeneInfo genes[GeneCount] = {
@@ -107,6 +121,7 @@ bool ParseComposition(const std::string& name, Composition& composition) {
 }
 
 const CompositionSpec& Spec(Composition composition) { return specs[static_cast<int>(composition)]; }
+const AllInPlan& AllIn(Composition composition) { return allInPlans[static_cast<int>(composition)]; }
 
 double CounterScore(Composition composition, const EnemyProfile& profile) {
     const auto& weights = counterWeights[static_cast<int>(composition)];
@@ -427,6 +442,8 @@ Decision Learner::Choose(int context, const EnemyProfile& profile, const std::ar
         const double explore = opening && m_explore ? 0.35 * std::sqrt(std::log(totalVisits + 2.0) / (m_bandit.Visits(context, composition) + 1.0)) : 0.0;
         const double techBonus = opening ? 0.0 : 0.35 * ownedTech[i];
         decision.scores[i] = counterWeight * CounterScore(composition, profile) + learned + explore + techBonus;
+        // An all-in is an opening plan: switching into one mid-match only throws away the economy.
+        if (!opening && AllIn(composition).active) continue;
         if (best < 0 || decision.scores[i] > decision.scores[best]) best = i;
     }
     if (opening) {

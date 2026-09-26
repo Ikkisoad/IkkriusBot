@@ -345,13 +345,10 @@ void HiveTech::ExecuteAirAssault() {
         Tools::CountUnitsOfType(BWAPI::UnitTypes::Zerg_Devourer, units, true), enemyAirSupply);
     if (choice == CombatPolicy::AirMorph::None) return;
     const auto type = choice == CombatPolicy::AirMorph::Guardian ? BWAPI::UnitTypes::Zerg_Guardian : BWAPI::UnitTypes::Zerg_Devourer;
-    for (auto unit : units) {
-        if (unit->getType() != BWAPI::UnitTypes::Zerg_Mutalisk || !unit->isCompleted() || unit->isMorphing() ||
-            unit->isUnderAttack() || unit->getHitPoints() < unit->getType().maxHitPoints() / 2) continue;
-        m_reserveMinerals = type.mineralPrice(); m_reserveGas = type.gasPrice();
-        if (Tools::MorphUnit(unit, type)) MatchLog::Event("air_morph", type.getName());
-        break;
-    }
+    m_reserveMinerals = type.mineralPrice(); m_reserveGas = type.gasPrice();
+    // Never morph where the cocoon can be killed: the Mutalisk is flown to a safe base of ours first.
+    const auto muta = Micro::AirMorphCandidate();
+    if (muta && Tools::MorphUnit(muta, type)) MatchLog::Event("air_morph", type.getName());
 }
 
 void HiveTech::SpendArmyBudget(int reserveMinerals, int reserveGas, int reserveSupply) {

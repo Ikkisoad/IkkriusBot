@@ -219,8 +219,11 @@ path, prioritizes Mutalisks, adds Queens, then commits to Hive at eight Mutalisk
 24 Drones on at least two Hatcheries. Greater Spire morphs produce Guardians for ground
 siege and Devourers for air cover. The morph policy preserves at least eight completed
 Mutalisks, normally fields one Devourer escort, and increases Devourers for visible
-combat aircraft. Idle, healthy Mutalisks morph one at a time, with resources reserved
-before spending on more production. Air attack and armor upgrades are included.
+combat aircraft. Healthy Mutalisks morph one at a time, with resources reserved
+before spending on more production. A cocoon cannot move or fight, so the chosen
+Mutalisk first flies to the closest of our bases with nothing that shoots air nearby
+(visible enemies or remembered static anti-air), and morphs only once it is there. If no
+base is safe it keeps fighting; if it has not arrived within 45 seconds another is picked. Air attack and armor upgrades are included.
 
 HiveTech groups nearby Hydras into squads of up to 12 and requests one Queen per squad.
 It replaces lost Queens and holds supply for missing support. A detached Hydra group
@@ -287,16 +290,38 @@ validate the new air strategy.
 
 ## Adaptive compositions and learning
 
-`Adaptive` is the default build. It can play nine compositions and switch between them
+`Adaptive` is the default build. It can play fourteen compositions and switch between them
 during a match:
 
 | # | Composition | # | Composition |
 |---|-------------|---|-------------|
-| 1 | `ZerglingQueenRush` | 6 | `LingMutaQueen` |
-| 2 | `HydraQueenRush` | 7 | `LingMutaGuardian` |
-| 3 | `MutaQueenRush` | 8 | `LurkerQueenMuta` |
-| 4 | `GuardianRush` | 9 | `LingQueenUltra` |
-| 5 | `MassMutaDevourer` | | |
+| 1 | `ZerglingQueenRush` | 8 | `LurkerQueenMuta` |
+| 2 | `HydraQueenRush` | 9 | `LingQueenUltra` |
+| 3 | `MutaQueenRush` | 10 | `HydraQueenUltra` |
+| 4 | `GuardianRush` | 11 | `ScourgeQueenUltra` |
+| 5 | `MassMutaDevourer` | 12 | `GuardianAllIn` |
+| 6 | `LingMutaQueen` | 13 | `MutaAllIn` |
+| 7 | `LingMutaGuardian` | 14 | `LurkerAllIn` |
+
+The three all-ins (12–14) are opening plans that try to land a key unit before the
+enemy can defend against it. Each has an `AllInPlan` in `learning/Learning.cpp`:
+
+| All-in | Drone cap | Geysers | Attacks with |
+|--------|-----------|---------|--------------|
+| `GuardianAllIn` | 20 | 2 | 4 Guardians (plus the Mutalisk escort) |
+| `MutaAllIn` | 16 | 1 | 9 Mutalisks |
+| `LurkerAllIn` | 16 | 1 | 4 Lurkers (plus Zerglings) |
+
+While an all-in is pending, every tech gate is capped at its drone count and tech steps
+do not wait on unit counts (Greater Spire goes down as soon as Hive finishes, Lurker
+Aspect as soon as the Den and Lair are ready). Units spend no gas until the key tech has
+started. Ling speed, upgrades, extra expansions, Devourers and experiments are skipped.
+The army waits at home until the key units are out, then attacks whatever the scouted
+odds. It does not retreat from a losing fight. It regroups only once the wave falls
+below a quarter of its launch size, or when a base at home is in an emergency. The
+bandit learns when all-ins pay off like any other composition. They are only chosen at
+the opening: mid-match switching never picks one, and a pending all-in is not switched
+away from.
 
 The bot remembers every enemy unit it has seen. It turns them into a tech profile: air,
 anti-air, splash, air splash, heavy ground units, small units, static defense, capital
@@ -335,11 +360,11 @@ state is saved to `bin/learning/adaptive-<race>.txt`, which is gitignored. Delet
 file to reset learning. Useful controls:
 
 ```powershell
-$env:IKKRIUS_COMP = 'LingMutaGuardian' # lock a composition (name or 1-9)
+$env:IKKRIUS_COMP = 'LingMutaGuardian' # lock a composition (name or 1-14)
 $env:IKKRIUS_LEARNING = '0'            # play the best known genome, no exploration or saving
 ```
 
-In game, type `comp` to show the current plan, `comp <name|1-9>` to lock a composition,
+In game, type `comp` to show the current plan, `comp <name|1-14>` to lock a composition,
 and `comp auto` to hand control back to the learners. The overlay shows the composition,
 the current step, the genome generation and index, and the number of switches. Match logs
 record `genome`, `composition`, and `learning` events.

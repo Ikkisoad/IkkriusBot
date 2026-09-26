@@ -83,4 +83,9 @@ namespace Micro
     bool BroodlingHunt(BWAPI::Unit queen);
     // While Guardians are on the field, targets under enemy static defense are left to them.
     bool AvoidsStaticDefense(BWAPI::Unit unit, BWAPI::Unit enemy);
+    // Guardian/Devourer morphs: picks a healthy Mutalisk and flies it to a safe base of ours first, since
+    // the cocoon cannot move or fight. Returns it once it is somewhere safe to morph, nullptr until then.
+    BWAPI::Unit AirMorphCandidate();
+    // True while `unit` is the Mutalisk flying home to morph (and this frame's order has been given).
+    bool MorphingHome(BWAPI::Unit unit);
 }

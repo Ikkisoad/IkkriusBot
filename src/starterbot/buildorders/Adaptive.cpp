@@ -129,7 +129,7 @@ void Adaptive::onStart() {
     BasesTools::SetOurBasePosition();
 
     m_enemyUnits.clear();
-    m_attacking = m_rushLaunched = m_openerDone = m_locked = m_loggedHatchFirst = false;
+    m_attacking = m_rushLaunched = m_allInCommitted = m_openerDone = m_locked = m_loggedHatchFirst = false;
     m_lastAttackEndFrame = m_attackArmy = 0;
     m_nextExperimentFrame = FramesPerSecond * 60 * 4;
     m_reserveMinerals = m_reserveGas = 0;
@@ -301,7 +301,7 @@ void Adaptive::EvaluateComposition(bool opening) {
     if (!opening) RecordActiveTime();
     m_context = Learning::ContextKey(m_enemyRace, profile);
     m_lastEvaluationFrame = BWAPI::Broodwar->getFrameCount();
-    if (m_locked) return;
+    if (m_locked || (!opening && AllInPending())) return;
     const double sinceSwitch = (BWAPI::Broodwar->getFrameCount() - m_lastSwitchFrame) / double(FramesPerSecond);
     const auto decision = m_learner.Choose(m_context, profile, OwnedTech(), !opening, m_composition, sinceSwitch, opening);
     if (opening || decision.switched) SetComposition(decision.composition, opening ? "opening" : "enemy_tech");
@@ -309,6 +309,22 @@ void Adaptive::EvaluateComposition(bool opening) {
 
 bool Adaptive::RushPending() const {
     return Learning::Spec(m_composition).rush && !m_rushLaunched;
+}
+
+bool Adaptive::AllInPending() const {
+    return Learning::AllIn(m_composition).active && !m_rushLaunched;
+}
+
+bool Adaptive::AllInSavingGas() const {
+    if (!AllInPending()) return false;
+    const auto self = BWAPI::Broodwar->self();
+    switch (Learning::AllIn(m_composition).key) {
+        case Army::Guardian: return !HasTech(Tech::GreaterSpire, false);
+        case Army::Mutalisk: return !HasTech(Tech::Spire, false);
+        case Army::Lurker: return !self->hasResearched(BWAPI::TechTypes::Lurker_Aspect) &&
+            !self->isResearching(BWAPI::TechTypes::Lurker_Aspect);
+        default: return false;
+    }
 }
 
 // Early aggression is the strongest thing scouted against this bot: a handful of combat units
@@ -325,9 +341,10 @@ bool Adaptive::EarlyAggressionScouted() const {
     return supply >= 6;
 }
 
-// Rush compositions compress every economic gate under the rush drone cap.
+// Rush compositions compress every economic gate under the rush drone cap; all-ins under their own cap.
 int Adaptive::Gate(Gene gene) const {
     const int value = m_genome.GetInt(gene);
+    if (AllInPending()) return std::min(value, Learning::AllIn(m_composition).droneCap);
     return RushPending() ? std::min(value, m_genome.GetInt(Gene::RushDroneCap)) : value;
 }
 
@@ -379,10 +396,10 @@ void Adaptive::Execute() {
         if (!emergency) AdvanceTech(counts);
         Economy(counts, emergency);
         if (!emergency) QueenSupport(counts);
-        if (!emergency) Upgrades(counts);
+        if (!emergency && !AllInPending()) Upgrades(counts);
         if (!emergency) NydusNetwork(counts);
         if (!emergency) LateGameSupport(counts);
-        if (!emergency) TryExperiment(counts);
+        if (!emergency && !AllInPending()) TryExperiment(counts);
         MorphAdvancedUnits(counts);
         SpendArmyBudget(counts);
         InfestedTerrans(emergency);
@@ -410,7 +427,9 @@ void Adaptive::Execute() {
 
     const auto& spec = Learning::Spec(m_composition);
     BWAPI::Broodwar->drawTextScreen(10, 10, "%s: %s%s | %s | gen %d #%d | switches %d", GetName().c_str(),
-        Learning::CompositionName(m_composition), spec.rush ? (m_rushLaunched ? " (rush sent)" : " (rush)") : "",
+        Learning::CompositionName(m_composition),
+        spec.rush ? (Learning::AllIn(m_composition).active ? (m_rushLaunched ? " (all-in sent)" : " (all-in)") :
+                     (m_rushLaunched ? " (rush sent)" : " (rush)")) : "",
         m_decision.c_str(), m_learner.GetPopulation().Generation(), m_learner.CurrentIndividual(), m_switches - 1);
     const auto constructionReserve = Tools::GetConstructionReserve();
     MatchLog::Snapshot(Learning::CompositionName(m_composition), m_decision,
@@ -495,7 +514,7 @@ void Adaptive::AdvanceTech(const Counts& counts) {
     const auto speed = [&]() {
         const auto upgrade = BWAPI::UpgradeTypes::Metabolic_Boost;
         if (spec.Share(Army::Zergling) <= 0 || self->getUpgradeLevel(upgrade) > 0 || self->isUpgrading(upgrade) ||
-            !poolReady || !HasTech(Tech::Extractor, true)) return false;
+            !poolReady || !HasTech(Tech::Extractor, true) || AllInPending()) return false;
         reserve(100, 100, "tech_ling_speed");
         Tools::ResearchUpgrade(upgrade);
         return true;
@@ -528,7 +547,7 @@ void Adaptive::AdvanceTech(const Counts& counts) {
     const auto lurker = BWAPI::TechTypes::Lurker_Aspect;
     if (spec.Share(Army::Lurker) > 0 && lairReady && HasTech(Tech::HydraliskDen, true) &&
         !self->hasResearched(lurker) && !self->isResearching(lurker) &&
-        counts.army[static_cast<int>(Army::Hydralisk)] >= m_genome.GetInt(Gene::LurkerHydras)) {
+        (AllInPending() || counts.army[static_cast<int>(Army::Hydralisk)] >= m_genome.GetInt(Gene::LurkerHydras))) {
         reserve(200, 200, "tech_lurker");
         Tools::ResearchTech(lurker);
         return;
@@ -545,7 +564,7 @@ void Adaptive::AdvanceTech(const Counts& counts) {
     }
     const bool hiveReady = HasTech(Tech::Hive, true);
     if (want(Tech::GreaterSpire) && hiveReady && HasTech(Tech::Spire, true) &&
-        counts.army[static_cast<int>(Army::Mutalisk)] >= m_genome.GetInt(Gene::GreaterSpireMutas)) {
+        (AllInPending() || counts.army[static_cast<int>(Army::Mutalisk)] >= m_genome.GetInt(Gene::GreaterSpireMutas))) {
         reserve(100, 150, "tech_greater_spire");
         MorphFirst(BWAPI::UnitTypes::Zerg_Spire, BWAPI::UnitTypes::Zerg_Greater_Spire);
         return;
@@ -557,7 +576,7 @@ void Adaptive::AdvanceTech(const Counts& counts) {
     }
     const bool groundArmy = spec.Share(Army::Zergling) + spec.Share(Army::Hydralisk) +
         spec.Share(Army::Lurker) + spec.Share(Army::Ultralisk) > 0;
-    if (groundArmy && !HasTech(Tech::EvolutionChamber, false) && counts.drones >= Gate(Gene::EvoDrones) &&
+    if (groundArmy && !AllInPending() && !HasTech(Tech::EvolutionChamber, false) && counts.drones >= Gate(Gene::EvoDrones) &&
         counts.armySupply / 2 >= m_genome.GetInt(Gene::UpgradeArmySupply)) {
         reserve(75, 0, "tech_evolution_chamber");
         Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Evolution_Chamber, 1, start);
@@ -567,7 +586,12 @@ void Adaptive::AdvanceTech(const Counts& counts) {
 void Adaptive::Economy(const Counts& counts, bool emergency) {
     const auto self = BWAPI::Broodwar->self();
     const auto threats = Micro::GetBaseThreats();
-    if (!emergency && counts.drones >= m_genome.GetInt(Gene::SecondGasDrones)) {
+    // An all-in takes exactly its planned geysers, the second one a few drones short of its cap.
+    const auto& allIn = Learning::AllIn(m_composition);
+    const bool moreGas = !AllInPending() ? counts.drones >= m_genome.GetInt(Gene::SecondGasDrones) :
+        Started(BWAPI::UnitTypes::Zerg_Extractor) < allIn.extractors &&
+        counts.drones >= std::min(m_genome.GetInt(Gene::SecondGasDrones), allIn.droneCap - 4);
+    if (!emergency && moreGas) {
         for (auto depot : self->getUnits()) {
             if (depot->getType().isResourceDepot() && depot->isCompleted() && self->minerals() >= m_reserveMinerals + 50)
                 Tools::EnsureBaseGas(depot);
@@ -580,7 +604,8 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     // Never breed drones past two per mineral patch (plus gas and a couple of builders).
     const auto mining = Tools::GetMiningCapacity();
     targetDrones = std::min(targetDrones, mining.mineralSlots + gasSlots + SpareBuilders);
-    if (RushPending()) targetDrones = std::min(targetDrones, m_genome.GetInt(Gene::RushDroneCap));
+    if (AllInPending()) targetDrones = std::min(targetDrones, allIn.droneCap);
+    else if (RushPending()) targetDrones = std::min(targetDrones, m_genome.GetInt(Gene::RushDroneCap));
     const double armyNeeded = m_genome.Get(Gene::ArmyPerDrone) * std::max(0, counts.drones - 12);
     if (!emergency && counts.drones < targetDrones && (m_openerDone || Ready(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) &&
         counts.armySupply / 2.0 >= armyNeeded && self->minerals() >= m_reserveMinerals + 50) {
@@ -602,7 +627,7 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     const bool saturated = mining.mineralSlots > 0 && counts.miningSites < 8 && !RushPending() &&
         mining.mineralWorkers + mining.idleWorkers >= mining.mineralSlots && mining.idleWorkers > 0;
     // Guardians holding the enemy's next base are the moment to take more of our own.
-    const bool contain = CombatPolicy::ContainExpansion(Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Guardian),
+    const bool contain = !AllInPending() && CombatPolicy::ContainExpansion(Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Guardian),
         counts.miningSites, counts.drones);
     if (natural || later || earlyThird || surplus || saturated || contain) {
         const auto expansion = BasesTools::GetNextExpansionPosition();
@@ -671,18 +696,15 @@ void Adaptive::MorphAdvancedUnits(const Counts& counts) {
         const int mutalisks = counts.army[static_cast<int>(Army::Mutalisk)];
         const int devourers = counts.army[static_cast<int>(Army::Devourer)];
         Army target = Army::Count;
-        if (CombatPolicy::WantDevourer(mutalisks, devourers)) target = Army::Devourer;
+        if (!AllInPending() && CombatPolicy::WantDevourer(mutalisks, devourers)) target = Army::Devourer;
         else if (spec.Share(Army::Guardian) > 0 && deficit(Army::Guardian) >= ArmyType(Army::Guardian).supplyRequired() &&
                  deficit(Army::Mutalisk) <= deficit(Army::Guardian)) target = Army::Guardian;
-        if (target != Army::Count) {
-            for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
-                if (unit->getType() != BWAPI::UnitTypes::Zerg_Mutalisk || !unit->isCompleted() || unit->isMorphing() ||
-                    unit->isUnderAttack() || unit->getHitPoints() < unit->getType().maxHitPoints() / 2) continue;
-                m_reserveMinerals = std::max(m_reserveMinerals, ArmyType(target).mineralPrice());
-                m_reserveGas = std::max(m_reserveGas, ArmyType(target).gasPrice());
-                if (Tools::MorphUnit(unit, ArmyType(target))) MatchLog::Event("air_morph", ArmyType(target).getName());
-                break;
-            }
+        if (target != Army::Count && mutalisks > 0) {
+            m_reserveMinerals = std::max(m_reserveMinerals, ArmyType(target).mineralPrice());
+            m_reserveGas = std::max(m_reserveGas, ArmyType(target).gasPrice());
+            // Never morph where the cocoon can be killed: the Mutalisk is flown to a safe base of ours first.
+            const auto muta = Micro::AirMorphCandidate();
+            if (muta && Tools::MorphUnit(muta, ArmyType(target))) MatchLog::Event("air_morph", ArmyType(target).getName());
         }
     }
     if (spec.Share(Army::Lurker) > 0 && BWAPI::Broodwar->self()->hasResearched(BWAPI::TechTypes::Lurker_Aspect) &&
@@ -705,7 +727,8 @@ void Adaptive::SpendArmyBudget(const Counts& counts) {
         std::max(0, m_genome.GetInt(Gene::QueenCount) - counts.queens) * BWAPI::UnitTypes::Zerg_Queen.supplyRequired() : 0;
     int supply = self->supplyTotal() - self->supplyUsed() - reserveSupply;
     int minerals = self->minerals() - m_reserveMinerals;
-    int gas = self->gas() - m_reserveGas;
+    // An all-in spends no gas on units until its key tech is under way.
+    int gas = AllInSavingGas() ? 0 : self->gas() - m_reserveGas;
 
     std::array<int, Learning::ArmyCount> army = counts.army;
     const bool canMake[] = {
@@ -1063,6 +1086,33 @@ int Adaptive::KnownEnemyArmySupply() const {
 
 void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
     const int frame = BWAPI::Broodwar->getFrameCount();
+    const auto& allIn = Learning::AllIn(m_composition);
+    if (AllInPending()) {
+        // Hold everything back until the key units are out, then attack whatever the scouted odds.
+        const int key = Ready(ArmyType(allIn.key));
+        if (emergency || !CombatPolicy::AllInReady(key, allIn.keyCount)) {
+            if (m_decision == "army_production") m_decision = "all_in_gather";
+            return;
+        }
+        m_attacking = m_rushLaunched = m_allInCommitted = true;
+        m_attackArmy = counts.armySupply / 2;
+        Micro::SetMode(Micro::MicroMode::Aggressive);
+        MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" +
+            std::to_string(m_attackArmy) + " enemy=" + std::to_string(KnownEnemyArmySupply() / 2) + " all_in key=" + std::to_string(key));
+        return;
+    }
+    if (m_allInCommitted) {
+        // The all-in keeps attacking until the wave is spent or a base at home needs it.
+        if (m_attacking && !emergency && !CombatPolicy::AllInSpent(counts.armySupply / 2, m_attackArmy)) return;
+        m_allInCommitted = false;
+        if (m_attacking) {
+            m_attacking = false;
+            m_lastAttackEndFrame = frame;
+            Micro::SetMode(Micro::MicroMode::Defensive);
+            MatchLog::Event("regroup", emergency ? "all_in_base_emergency" : "all_in_spent");
+        }
+        return;
+    }
     const int baseThreshold = RushPending() ? m_genome.GetInt(Gene::RushAttackSupply) : m_genome.GetInt(Gene::AttackSupply);
     // Waiting costs: every idle minute lowers the size needed to move out.
     const int threshold = RushPending() ? baseThreshold :
@@ -1118,7 +1168,7 @@ void Adaptive::onEnd(bool isWinner) {
 }
 
 void Adaptive::onSendText(std::string text) {
-    // "comp" prints the plan, "comp <name|1-9>" locks a composition, "comp auto" resumes learning control.
+    // "comp" prints the plan, "comp <name|number>" locks a composition, "comp auto" resumes learning control.
     if (text.rfind("comp", 0) != 0) return;
     const auto argument = text.size() > 5 ? text.substr(5) : std::string();
     Composition requested;

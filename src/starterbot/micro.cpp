@@ -1057,6 +1057,8 @@ namespace {
     BWAPI::Position siegeEscort = BWAPI::Positions::None;
     // The known enemy base closest to the ground army's main body; None means the enemy main.
     BWAPI::Position groundObjective = BWAPI::Positions::None;
+    // The Mutalisk picked to morph into a Guardian or Devourer, flown home first, and when it was picked.
+    int airMorpher = -1, airMorpherSince = 0;
 }
 
 // True when `enemy` sits inside enemy static defense that `unit` is staying out of.
@@ -1638,6 +1640,7 @@ void Micro::ResetCombatState() {
     knownDefenses.clear(); assaultUntil.clear(); assaultCheck.clear();
     controlSpots.clear(); controlFrame = -1;
     siegeEscort = groundObjective = BWAPI::Positions::None;
+    airMorpher = -1; airMorpherSince = 0;
     queenPrey.clear(); preyAvoid.clear();
 }
 
@@ -1731,6 +1734,89 @@ void Micro::ScourgeStrikeLoop(BWAPI::Unit scourge, BWAPI::Position escort) {
     SmartMove(scourge, escort);
 }
 
+namespace {
+    // How far `spot` is outside the reach of everything known to shoot air: visible enemies, and static
+    // anti-air remembered through the fog. Large when nothing is near.
+    int AntiAirMargin(BWAPI::Position spot) {
+        int margin = 100000;
+        for (auto enemy : BWAPI::Broodwar->getUnitsInRadius(spot, 1024, BWAPI::Filter::IsEnemy)) {
+            if (!enemy->exists() || !enemy->isVisible()) continue;
+            int reach = AirThreatRange(enemy);
+            // Spellcasters (Storm, Irradiate, Plague) hit cocoons as hard as any weapon.
+            if (reach < 0 && enemy->getType().isSpellcaster() && !enemy->getType().isBuilding()) reach = 9 * 32;
+            if (reach < 0) continue;
+            margin = std::min(margin, enemy->getPosition().getApproxDistance(spot) - reach);
+        }
+        for (const auto& cover : airCover) margin = std::min(margin, CoverDistance(spot, cover) - cover.reach);
+        return margin;
+    }
+
+    // Our completed bases with nothing that shoots air anywhere near: where cocoons are safe.
+    std::vector<BWAPI::Position> SafeMorphBases() {
+        std::vector<BWAPI::Position> bases;
+        for (auto depot : BWAPI::Broodwar->self()->getUnits())
+            if (depot->getType().isResourceDepot() && depot->isCompleted() &&
+                CombatPolicy::SafeMorphSpot(0, AntiAirMargin(depot->getPosition()))) bases.push_back(depot->getPosition());
+        return bases;
+    }
+
+    // Where `muta` should morph: over the closest safe base of ours, or None.
+    BWAPI::Position MorphSpot(BWAPI::Unit muta, const std::vector<BWAPI::Position>& bases) {
+        BWAPI::Position best = BWAPI::Positions::None;
+        for (auto base : bases)
+            if (!best.isValid() || muta->getDistance(base) < muta->getDistance(best)) best = base;
+        return best;
+    }
+
+    // Distance from `unit` to our nearest completed base.
+    int DistanceToOwnBase(BWAPI::Unit unit) {
+        int distance = 100000;
+        for (auto depot : BWAPI::Broodwar->self()->getUnits())
+            if (depot->getType().isResourceDepot() && depot->isCompleted()) distance = std::min(distance, unit->getDistance(depot));
+        return distance;
+    }
+
+    bool MorphEligible(BWAPI::Unit unit) {
+        return unit && unit->exists() && unit->getPlayer() == BWAPI::Broodwar->self() &&
+            unit->getType() == BWAPI::UnitTypes::Zerg_Mutalisk && unit->isCompleted() && !unit->isMorphing() &&
+            unit->getHitPoints() >= unit->getType().maxHitPoints() / 2;
+    }
+}
+
+BWAPI::Unit Micro::AirMorphCandidate() {
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    auto morpher = airMorpher >= 0 ? BWAPI::Broodwar->getUnit(airMorpher) : nullptr;
+    if (!MorphEligible(morpher) || frame - airMorpherSince > CombatPolicy::MorphTravelFrames) morpher = nullptr;
+    if (!morpher) {
+        // The healthy Mutalisk closest to a safe base, so the trip home is short.
+        const auto bases = SafeMorphBases();
+        int best = std::numeric_limits<int>::max();
+        for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+            if (!MorphEligible(unit) || unit->getID() == airMorpher || unit->isUnderAttack()) continue;
+            const auto spot = MorphSpot(unit, bases);
+            if (!spot.isValid() || unit->getDistance(spot) >= best) continue;
+            best = unit->getDistance(spot);
+            morpher = unit;
+        }
+        airMorpher = morpher ? morpher->getID() : -1;
+        airMorpherSince = frame;
+        if (!morpher) return nullptr;
+    }
+    if (morpher->isUnderAttack() ||
+        !CombatPolicy::SafeMorphSpot(DistanceToOwnBase(morpher), AntiAirMargin(morpher->getPosition()))) return nullptr;
+    airMorpherSince = frame; // Arrived: it keeps the claim while the morph waits on resources.
+    return morpher;
+}
+
+bool Micro::MorphingHome(BWAPI::Unit unit) {
+    if (!unit || unit->getID() != airMorpher || !MorphEligible(unit)) return false;
+    const auto spot = MorphSpot(unit, SafeMorphBases());
+    if (!spot.isValid()) { airMorpher = -1; return false; }
+    BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Morph: going home");
+    if (unit->getDistance(spot) > 64) SmartMove(unit, spot);
+    return true;
+}
+
 void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave, bool needsDetection) {
     const auto threats = GetBaseThreats();
     // Drones help hold a base the army cannot; they are left alone by the rest of this loop.
@@ -1753,6 +1839,10 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
             combat.insert(unit);
             if (!unit->isFlying()) groundPositions.push_back(unit->getPosition());
         }
+    }
+    // A Mutalisk flying home to morph is out of the flock and the raid squad.
+    if (airMorpher >= 0) {
+        for (auto muta : mutalisks) if (muta->getID() == airMorpher) { mutalisks.erase(muta); break; }
     }
     // Raiders leave the main flock, so escort and regroup centers ignore them.
     const auto raid = UpdateRaidSquad(mutalisks, pressureWave, rally);
@@ -1816,6 +1906,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
     for (auto unit : myUnits) {
         if (!unit->exists() || !unit->isCompleted() || unit->isLoaded() || unit->isMorphing()) continue;
         if (droneFighters.contains(unit)) continue;
+        if (MorphingHome(unit)) continue;
         const auto type = unit->getType();
         const bool army = !type.isWorker() && !type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Larva &&
             type != BWAPI::UnitTypes::Zerg_Overlord && type != BWAPI::UnitTypes::Zerg_Egg;

@@ -90,6 +90,16 @@ namespace CombatPolicy {
         return AirMorph::None;
     }
 
+    // A Guardian or Devourer cocoon cannot move or fight for the whole morph: the Mutalisk morphs only
+    // close to one of our own bases and well outside the reach of anything that shoots air.
+    constexpr int MorphHomeRadius = 320;
+    constexpr int MorphThreatClearance = 256;
+    // A Mutalisk sent home to morph that has not arrived by then is released and another one picked.
+    constexpr int MorphTravelFrames = 24 * 45;
+    inline bool SafeMorphSpot(int distanceToOwnBase, int antiAirMargin) {
+        return distanceToOwnBase <= MorphHomeRadius && antiAirMargin > MorphThreatClearance;
+    }
+
     // Hit-and-run only pays against shorter-ranged units; against equal or longer
     // range, backing off during cooldown just hands the enemy free shots.
     inline bool KiteWorthwhile(int myRange, int threatRange) { return myRange > threatRange; }
@@ -314,4 +324,10 @@ namespace CombatPolicy {
     inline bool EarlyThird(bool hiveComposition, bool rushPending, int miningSites, int drones, int earlyThirdDrones) {
         return hiveComposition && !rushPending && miningSites == 2 && drones >= earlyThirdDrones;
     }
+
+    // Early all-ins hold their army until the key unit count is out, then commit: no retreat for a lost
+    // fight, only once the wave is mostly spent (or a base at home is under attack).
+    constexpr double AllInSpentFraction = 0.25;
+    inline bool AllInReady(int keyUnits, int keyTarget) { return keyTarget > 0 && keyUnits >= keyTarget; }
+    inline bool AllInSpent(int army, int launchArmy) { return army < std::max(1, launchArmy) * AllInSpentFraction; }
 }

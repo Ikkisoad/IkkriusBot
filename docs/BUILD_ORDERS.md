@@ -77,14 +77,16 @@ Additional state tracked:
 
 ## Adaptive — [`src/starterbot/buildorders/Adaptive.h`](../src/starterbot/buildorders/Adaptive.h)
 
-**Default strategy.** Plays nine compositions: Zergling/Queen, Hydra/Queen, and Muta/Queen
+**Default strategy.** Plays fourteen compositions: Zergling/Queen, Hydra/Queen, and Muta/Queen
 rushes; Guardian rush; mass Muta + Devourer; Ling/Muta/Queen; Ling/Muta/Guardian;
-Lurker/Queen/Muta; and Ling/Queen/Ultralisk. It switches between them mid-match based on
-scouted enemy tech. Each composition is a `CompositionSpec` in
+Lurker/Queen/Muta; Ling/Queen/Ultralisk; Hydra/Queen/Ultralisk; Scourge/Queen/Ultralisk;
+and three early all-ins (Guardian, Muta and Lurker). It switches between them mid-match
+based on scouted enemy tech; all-ins are only chosen at the opening (see `AllInPlan`). Each composition is a `CompositionSpec` in
 [`learning/Learning.cpp`](../src/starterbot/learning/Learning.cpp): army supply shares,
 a rush flag, and whether Queens are needed. The tech path is derived from these, and
 larva goes to the unit furthest below its share. Guardians and Devourers are morphed
-from Mutalisks, and Lurkers from Hydralisks.
+from Mutalisks (flown to a safe base of ours first, see `Micro::AirMorphCandidate`), and
+Lurkers from Hydralisks.
 
 Step timings come from a genome evolved by a genetic algorithm. Composition choice comes
 from a contextual bandit trained on match rewards. See the README section

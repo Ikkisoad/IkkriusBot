@@ -151,6 +151,12 @@ bool BuildBuildingOptimal(BWAPI::UnitType type,BWAPI::TilePosition) {
 namespace Micro {
 std::vector<BWAPI::Unitset> testGroups;
 std::vector<BWAPI::Unitset> GetHydraGroups(const BWAPI::Unitset&) { return testGroups; }
+// The real one also flies the Mutalisk home first; here every Mutalisk already sits at a safe base.
+BWAPI::Unit AirMorphCandidate() {
+    for(auto unit:BWAPI::Broodwar->self()->getUnits())
+        if(unit->getType()==BWAPI::UnitTypes::Zerg_Mutalisk && unit->isCompleted() && !unit->isMorphing()) return unit;
+    return nullptr;
+}
 }
 namespace BasesTools {
 std::vector<BWAPI::TilePosition> allBasePositions{{0},{20},{40},{60},{80}};

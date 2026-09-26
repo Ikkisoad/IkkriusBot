@@ -45,6 +45,7 @@ private:
     int m_switches = 0;
     bool m_attacking = false;
     bool m_rushLaunched = false;
+    bool m_allInCommitted = false; // The all-in wave is out and does not retreat until it is spent.
     bool m_openerDone = false;
     bool m_loggedHatchFirst = false;
     int m_lastAttackEndFrame = 0;  // When the army last stood down (or the match start).
@@ -69,6 +70,10 @@ private:
     void SetComposition(Learning::Composition composition, const std::string& reason);
 
     bool RushPending() const;
+    // An all-in composition whose attack has not left yet.
+    bool AllInPending() const;
+    // While the all-in's key tech has not started, gas is saved for it instead of spent on units.
+    bool AllInSavingGas() const;
     // The scout saw enemy combat units mass before our own defense exists: build sunkens sooner.
     bool EarlyAggressionScouted() const;
     int Gate(Learning::Gene gene) const;

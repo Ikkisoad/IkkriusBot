@@ -19,6 +19,7 @@ source=r"""
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -49,6 +50,7 @@ struct UnitType {
     int id=0, supply=2, hp=100;
     bool building=false, worker=false, depot=false;
     WeaponType ground{}, air{};
+    bool isSpellcaster() const { return false; }
     bool canAttack() const { return ground!=WeaponTypes::None || air!=WeaponTypes::None; }
     bool isBuilding() const { return building; }
     bool isWorker() const { return worker; }
@@ -71,7 +73,8 @@ const UnitType Terran_Bunker{1,0,350,true}, Protoss_Carrier{2,12,300},
     Zerg_Scourge{9,1,25,false,false,false,WeaponTypes::None,WeaponTypes::Suicide},
     Terran_Command_Center{10,0,1500,true,false,true},
     Zerg_Sunken_Colony{11,0,300,true,false,false,WeaponTypes::Subterranean_Spines},
-    Zerg_Hydralisk{12,2,80,false,false,false,WeaponTypes::Gauss_Rifle,WeaponTypes::Gauss_Rifle};
+    Zerg_Hydralisk{12,2,80,false,false,false,WeaponTypes::Gauss_Rifle,WeaponTypes::Gauss_Rifle},
+    Zerg_Hatchery{13,0,1250,true,false,true};
 }
 namespace Filter { const int IsEnemy=1; }
 struct FakeUnit;
@@ -87,7 +90,8 @@ std::vector<Unit> world;
 struct FakeUnit {
     UnitType type; Player* player=nullptr; Position position; int id=0;
     int hp=-1, airCooldown=0, groundCooldown=0;
-    bool alive=true, visible=true, complete=true, detected=true, flying=false;
+    bool alive=true, visible=true, complete=true, detected=true, flying=false, morphing=false, underAttack=false;
+    bool isMorphing() { return morphing; } bool isUnderAttack() { return underAttack; }
     UnitType getType() { return type; }
     Player* getPlayer() { return player; }
     Position getPosition() { return position; }
@@ -153,6 +157,8 @@ void ResetCombatState();
 bool AvoidsStaticDefense(BWAPI::Unit, BWAPI::Unit);
 void MarkSpellArea(BWAPI::Position, int);
 bool DodgeFriendlySpell(BWAPI::Unit);
+BWAPI::Unit AirMorphCandidate();
+bool MorphingHome(BWAPI::Unit);
 }
 using Micro::SmartMove;
 """
@@ -175,6 +181,7 @@ source+='std::map<int,int> lurkerLastContact; std::set<int> droneDefenders;\n'
 source+='std::vector<BWAPI::Position> controlSpots; int controlFrame=-1;\n'+function('void Micro::ResetCombatState')+'\n'
 source+=function('void Micro::MutaliskRaidLoop')+'\n'
 source+=function('void Micro::GuardianAssaultLoop')+'\n'
+source+=between('namespace {\n    // How far `spot` is outside the reach', 'void Micro::HiveTechMicroLoop(')
 source+=r"""
 int main() {
     using namespace BWAPI;
@@ -353,6 +360,44 @@ int main() {
     assert(GuardianSiegeActive(1) && !GuardianSiegeActive(0));
     assert(GuardianContain(4,false) && !GuardianContain(4,true) && !GuardianContain(3,false));
     assert(ContainExpansion(4,3,30) && !ContainExpansion(3,3,30) && !ContainExpansion(4,3,29) && !ContainExpansion(4,7,90));
+
+    // Guardian/Devourer morphs: the cocoon cannot move or fight, so the Mutalisk flies to a safe base first.
+    assert(SafeMorphSpot(0,MorphThreatClearance+1) && !SafeMorphSpot(0,MorphThreatClearance));
+    assert(!SafeMorphSpot(MorphHomeRadius+1,100000));
+    for (auto u : world) u->alive=false;
+    ResetCombatState(); game.fog.clear(); enemy.airBonus=0;
+    auto main=make(UnitTypes::Zerg_Hatchery,&self,100,100);
+    auto natural=make(UnitTypes::Zerg_Hatchery,&self,2000,100);
+    auto morpher=make(UnitTypes::Zerg_Mutalisk,&self,1500,1500); morpher->flying=true;
+    assert(Micro::AirMorphCandidate()==nullptr); // Out in the field: not here.
+    Micro::Reset(); assert(Micro::MorphingHome(morpher) && Micro::moved==natural->position); // Closest safe base.
+    auto turretGuard=make(UnitTypes::Terran_Goliath,&enemy,2150,100);
+    Micro::Reset(); assert(Micro::MorphingHome(morpher) && Micro::moved==main->position); // The natural is under anti-air.
+    morpher->position={120,110};
+    assert(Micro::AirMorphCandidate()==morpher); // Home and safe: morph.
+    auto raider=make(UnitTypes::Terran_Marine,&enemy,300,100);
+    assert(Micro::AirMorphCandidate()==nullptr); // Anti-air at the base: wait.
+    assert(!Micro::MorphingHome(morpher)); // No safe base left: released to fight normally.
+    raider->alive=false; turretGuard->alive=false;
+    morpher->hp=50;
+    auto healthy=make(UnitTypes::Zerg_Mutalisk,&self,1500,900); healthy->flying=true;
+    assert(Micro::AirMorphCandidate()==nullptr); // The damaged one is skipped, the healthy one called home.
+    assert(!Micro::MorphingHome(morpher) && Micro::MorphingHome(healthy));
+    healthy->position={2000,120};
+    assert(Micro::AirMorphCandidate()==healthy);
+    healthy->morphing=true; // Morph issued: the claim is released.
+    assert(!Micro::MorphingHome(healthy));
+    // A Mutalisk that never arrives is replaced.
+    healthy->alive=false; morpher->hp=-1; morpher->position={2500,2500};
+    auto stray=make(UnitTypes::Zerg_Mutalisk,&self,3000,3000); stray->flying=true;
+    assert(Micro::AirMorphCandidate()==nullptr && Micro::MorphingHome(morpher)); // Closest to a safe base.
+    game.frame+=MorphTravelFrames+1;
+    assert(Micro::AirMorphCandidate()==nullptr && Micro::MorphingHome(stray) && !Micro::MorphingHome(morpher));
+    for (auto u : world) u->alive=false;
+
+    // Early all-ins attack once the key units are out and hold until the wave is mostly spent.
+    assert(!AllInReady(3,4) && AllInReady(4,4) && !AllInReady(0,0));
+    assert(!AllInSpent(10,30) && AllInSpent(7,30) && AllInSpent(0,0));
     std::cout << "Air micro, Guardian siege and static-defense regressions passed.\n";
 }
 """
