@@ -49,6 +49,7 @@ struct UnitType {
     int id=0, supply=2, hp=100;
     bool building=false, worker=false, depot=false;
     WeaponType ground{}, air{};
+    bool canAttack() const { return ground!=WeaponTypes::None || air!=WeaponTypes::None; }
     bool isBuilding() const { return building; }
     bool isWorker() const { return worker; }
     bool isResourceDepot() const { return depot; }
@@ -117,7 +118,8 @@ struct Game {
     void drawTextMap(Position, const char*) {}
     Unitset getAllUnits() { return Unitset(world.begin(), world.end()); }
     Unit getUnit(int id) { for (auto u : world) if (u->id==id) return u; return nullptr; }
-    bool isVisible(TilePosition) { return true; }
+    std::vector<std::pair<Position,int>> fog; // Circles we cannot see.
+    bool isVisible(TilePosition t) { for (auto& c : fog) if (t.position.getApproxDistance(c.first)<=c.second) return false; return true; }
     Unitset getUnitsInRadius(Position center, int radius, int filter=0) {
         Unitset result;
         for (auto u : world) if (u->alive && u->position.getApproxDistance(center)<=radius && (!filter || u->player->hostile)) result.insert(u);
@@ -154,21 +156,23 @@ bool DodgeFriendlySpell(BWAPI::Unit);
 }
 using Micro::SmartMove;
 """
+source+='namespace {\n'+function('double CombatPower(')+'\n}\n'
 source+=text[text.index('namespace {\n    // Enemy static defense'):text.index('void Micro::SmartAttackMove')]
 source+='namespace {\n'
 
 for signature in ('BWAPI::Position UnitCenter(', 'int AirThreatRange(', 'bool IsStaticAntiAir(',
-                  'int ThreatMargin(', 'BWAPI::Position AwayFrom(', 'int StaticReach(', 'int TerrainAdvantage(',
+                  'int ThreatMargin(', 'BWAPI::Position AwayFromPoints(', 'BWAPI::Position AwayFrom(', 'int StaticReach(', 'int TerrainAdvantage(',
                   'BWAPI::Position GuardianPerch('):
     source+=function(signature)+'\n'
 source+=between('// Our own units step out of an area', '// Mutalisk raid squad, kept stable across frames.')
 source+=between('// Mutalisk raid squad, kept stable across frames.', 'bool HarassAvoided(')
 for signature in ('bool HarassAvoided(', 'void EndRaid(', 'RaidOrders UpdateRaidSquad(', 'BWAPI::Position ChooseGuardianSiege(',
-                  'void UpdateStaticCover(', 'bool KeepOutOfStaticDefense('):
+                  'bool Assaulting(', 'void UpdateStaticCover(', 'bool KeepOutOfStaticDefense(', 'BWAPI::Position SafeObjective('):
     source+=function(signature)+'\n'
 source+='}\n'
 source+=function('void Micro::MarkSpellArea')+'\n'+function('bool Micro::DodgeFriendlySpell')+'\n'
-source+='std::map<int,int> lurkerLastContact;\n'+function('void Micro::ResetCombatState')+'\n'
+source+='std::map<int,int> lurkerLastContact; std::set<int> droneDefenders;\n'
+source+='std::vector<BWAPI::Position> controlSpots; int controlFrame=-1;\n'+function('void Micro::ResetCombatState')+'\n'
 source+=function('void Micro::MutaliskRaidLoop')+'\n'
 source+=function('void Micro::GuardianAssaultLoop')+'\n'
 source+=r"""
@@ -298,8 +302,40 @@ int main() {
     assert(!KeepOutOfStaticDefense(hydra,{900,2000}) && !Micro::AvoidsStaticDefense(hydra,make(UnitTypes::Terran_Marine,&enemy,1200,2000)));
     UpdateStaticCover(true,{colony}); // A colony raiding our base is fought, not avoided.
     assert(!Micro::AvoidsStaticDefense(hydra,guard));
+
+    // Without Guardians: not attacking, colonies are never entered; attacking, only with the power to kill them.
+    Micro::mode=Micro::MicroMode::Defensive;
     UpdateStaticCover(false,{});
-    assert(!Micro::AvoidsStaticDefense(hydra,guard));
+    assert(Micro::AvoidsStaticDefense(hydra,guard));
+    hydra->position={700,2000};
+    Micro::Reset(); assert(KeepOutOfStaticDefense(hydra,{900,2000}) && Micro::moved.x>700);
+    Micro::mode=Micro::MicroMode::Aggressive; game.frame+=20;
+    UpdateStaticCover(false,{});
+    assert(Micro::AvoidsStaticDefense(hydra,guard)); // One Hydralisk does not take on a Sunken and its guard.
+    std::vector<Unit> wave;
+    for (int i=0;i<10;++i) wave.push_back(make(UnitTypes::Zerg_Hydralisk,&self,800+i*10,2000));
+    game.frame+=20; events.clear();
+    UpdateStaticCover(false,{});
+    assert(!Micro::AvoidsStaticDefense(hydra,guard) && !KeepOutOfStaticDefense(hydra,{900,2000})); // Strong enough: go in.
+    assert(std::count(events.begin(),events.end(),"static_assault")==1);
+    for (int i=0;i<4;++i) wave[i]->alive=false;
+    game.frame+=20; UpdateStaticCover(false,{});
+    assert(!Micro::AvoidsStaticDefense(hydra,guard)); // A committed assault holds through a few losses...
+    for (int i=4;i<10;++i) wave[i]->alive=false;
+    game.frame+=20; UpdateStaticCover(false,{});
+    assert(Micro::AvoidsStaticDefense(hydra,guard)); // ...but not once it is clearly lost.
+    // Colonies are remembered through the fog, and forgotten once seen gone.
+    guard->alive=false; colony->visible=false; game.fog.push_back({{500,2000},64});
+    Micro::mode=Micro::MicroMode::Defensive; game.frame+=20;
+    UpdateStaticCover(false,{});
+    assert(Micro::AvoidsStaticDefense(hydra,make(UnitTypes::Terran_SCV,&enemy,520,2000)));
+    // A destination under the colony becomes the edge of its reach, on our side.
+    const auto edge=SafeObjective({1500,2000},{500,2000});
+    assert(edge.x>500+224 && edge.x<1500 && SafeObjective({1500,2000},{3000,3000})==Position(3000,3000));
+    colony->alive=false; game.fog.clear();
+    UpdateStaticCover(false,{});
+    assert(!Micro::AvoidsStaticDefense(hydra,make(UnitTypes::Terran_SCV,&enemy,520,2000)));
+    Micro::mode=Micro::MicroMode::Defensive;
 
     // Friendly Ensnare: units under the cloud step out until it lands.
     hydra->position={120,100};

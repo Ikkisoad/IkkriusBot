@@ -32,10 +32,18 @@ struct TechType {
     bool operator!=(TechType other) const { return id!=other.id; }
     bool operator==(TechType other) const { return id==other.id; }
 };
-namespace TechTypes { const TechType Spawn_Broodlings{1}, Ensnare{2}, Parasite{3}; }
+namespace TechTypes { const TechType Spawn_Broodlings{1}, Ensnare{2}, Parasite{3}, Infestation{4}; }
+struct WeaponType {
+    int id=0;
+    bool operator!=(WeaponType other) const { return id!=other.id; }
+};
+namespace WeaponTypes { const WeaponType None{0}, Anti_Air{1}; }
 struct UnitType {
     int id=0, minerals=50, gas=0, supply=2;
     bool building=false, attack=true;
+    int hp=100; WeaponType air{};
+    int maxHitPoints() const { return hp; }
+    WeaponType airWeapon() const { return air; }
     bool operator==(UnitType other) const { return id==other.id; }
     bool operator!=(UnitType other) const { return id!=other.id; }
     bool isBuilding() const { return building; }
@@ -47,9 +55,11 @@ struct UnitType {
 namespace UnitTypes {
 const UnitType Zerg_Queen{1,100,100,4,false,false}, Zerg_Hydralisk{2,75,25,2},
 Terran_Siege_Tank_Siege_Mode{3,150,100,4}, Terran_Siege_Tank_Tank_Mode{4,150,100,4},
-Protoss_High_Templar{5,50,150,4}, Zerg_Defiler{6,50,150,4};
+Protoss_High_Templar{5,50,150,4}, Zerg_Defiler{6,50,150,4},
+Terran_Command_Center{7,400,0,0,true,false,1500}, Terran_Missile_Turret{8,75,0,0,true,true,200,WeaponTypes::Anti_Air};
 }
-namespace UnitCommandTypes { enum { None, Use_Tech_Unit, Use_Tech_Position }; }
+namespace UnitCommandTypes { enum { None, Use_Tech_Unit, Use_Tech_Position, Right_Click_Unit }; }
+struct FakeUnit;
 namespace Filter { const int IsEnemy=1; }
 struct FakeUnit;
 using Unit=FakeUnit*;
@@ -61,7 +71,7 @@ struct Player {
     bool hasResearched(TechType) { return researched; }
     Unitset getUnits() { return units; }
 };
-struct Command {
+struct UnitCommand {
     int kind=0;
     TechType tech;
     Unit target=nullptr;
@@ -79,8 +89,8 @@ struct FakeUnit {
     Position position;
     bool alive=true, visible=true, detected=true, flying=false, complete=true, morphing=false;
     bool ensnared=false, parasited=false, broodable=true, interruptible=true, canAttackAir=true;
-    int energy=200, lastFrame=-100, spellCooldown=0, casts=0;
-    Command command;
+    int energy=200, lastFrame=-100, spellCooldown=0, casts=0, hp=-1;
+    UnitCommand command;
     Unitset neighbors;
     bool exists() { return alive; } bool isVisible() { return visible; }
     bool isDetected() { return detected; } bool isFlying() { return flying; }
@@ -88,16 +98,25 @@ struct FakeUnit {
     bool isInterruptible() { return interruptible; }
     bool isEnsnared() { return ensnared; } bool isParasited() { return parasited; }
     int getID() { return id; } int getEnergy() { return energy; }
+    int getHitPoints() { return hp<0 ? type.hp : hp; }
     int getLastCommandFrame() { return lastFrame; } int getSpellCooldown() { return spellCooldown; }
-    Command getLastCommand() { return command; }
+    UnitCommand getLastCommand() { return command; }
     UnitType getType() { return type; } Player* getPlayer() { return player; }
     Position getPosition() { return position; }
     int getDistance(Unit other) { return position.getApproxDistance(other->position); }
     Unitset getUnitsInRadius(int radius,int) { Unitset result; for(auto u:neighbors) if(u->player->hostile && getDistance(u)<=radius) result.insert(u); return result; }
     bool canAttack(Unit target) { return target->flying && canAttackAir; }
-    bool canUseTech(TechType tech,Unit target) { return energy>=tech.energyCost() && (tech.id!=1 || target->broodable); }
+    bool canUseTech(TechType tech,Unit target) {
+        if (tech.id==4) return target->type==UnitTypes::Terran_Command_Center && target->getHitPoints()*2<target->type.hp;
+        return energy>=tech.energyCost() && (tech.id!=1 || target->broodable);
+    }
     bool canUseTech(TechType tech,Position) { return energy>=tech.energyCost(); }
-    bool useTech(TechType tech,Unit target) { ++casts; energy-=tech.energyCost(); lastFrame=frame; command={UnitCommandTypes::Use_Tech_Unit,tech,target,target->position}; return true; }
+    bool useTech(TechType tech,Unit target) {
+        ++casts; energy-=tech.id==4 ? 0 : tech.energyCost(); lastFrame=frame;
+        // Like BWAPI: an Infestation order is recorded as a right-click on the Command Center.
+        command={tech.id==4 ? UnitCommandTypes::Right_Click_Unit : UnitCommandTypes::Use_Tech_Unit,tech.id==4 ? TechType{} : tech,target,target->position};
+        return true;
+    }
     bool useTech(TechType tech,Position target) { ++casts; energy-=tech.energyCost(); lastFrame=frame; command={UnitCommandTypes::Use_Tech_Position,tech,nullptr,target}; return true; }
 };
 struct Game {
@@ -169,6 +188,28 @@ int main() {
     assert(Micro::QueenCastLoop(&queen2,{&marine1,&marine2,&marine3,&marine4,&marine5,&marine6}));
     assert(queen2.command.tech==TechTypes::Ensnare && queen2.command.position.x>=240 && Micro::marked==2);
     game.player.units.erase(&ling);
+
+    // Queens walk up to cast on a cluster just outside the 9-tile cast range, unless badly hurt.
+    frame+=40; queen2.energy=75; queen2.lastFrame=-100; queen2.command={}; queen2.casts=0;
+    FakeUnit far1{{20},&enemy,26,{340,0}}, far2{{20},&enemy,27,{350,0}}, far3{{20},&enemy,28,{360,0}};
+    queen2.hp=40; // Below half health: stays at the normal range.
+    assert(!Micro::QueenCastLoop(&queen2,{&far1,&far2,&far3}) && queen2.casts==0);
+    queen2.hp=-1;
+    assert(Micro::QueenCastLoop(&queen2,{&far1,&far2,&far3}) && queen2.command.tech==TechTypes::Ensnare);
+
+    // A Command Center below half health is infested for free, unless anti-air guards it.
+    frame+=40; queen.energy=0; queen.lastFrame=-100; queen.command={}; queen.casts=0;
+    FakeUnit center{UnitTypes::Terran_Command_Center,&enemy,50,{200,0}};
+    assert(!Micro::QueenCastLoop(&queen,{&center})); // Healthy: not infestable yet.
+    center.hp=700;
+    FakeUnit turret1{UnitTypes::Terran_Missile_Turret,&enemy,51,{260,0}}, turret2{UnitTypes::Terran_Missile_Turret,&enemy,52,{200,60}};
+    assert(!Micro::QueenCastLoop(&queen,{&center,&turret1,&turret2}) && queen.casts==0);
+    assert(Micro::QueenCastLoop(&queen,{&center,&turret1}));
+    assert(queen.command.kind==UnitCommandTypes::Right_Click_Unit && queen.command.target==&center && queen.energy==0);
+    ++frame;
+    assert(Micro::QueenCastLoop(&queen,{&center}) && queen.casts==1); // The walk to the Command Center is not re-ordered.
+    queen2.lastFrame=-100; queen2.command={}; queen2.energy=0; queen2.casts=0;
+    assert(!Micro::QueenCastLoop(&queen2,{&center}) && queen2.casts==0); // One Queen per Command Center.
     assert(CombatPolicy::EnsnareScore(3,0)==3 && CombatPolicy::EnsnareScore(4,1)==0 && CombatPolicy::EnsnareScore(5,1)==3);
     assert(CombatPolicy::EnsnareScore(2,0)==0);
 

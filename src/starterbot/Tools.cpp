@@ -456,6 +456,20 @@ bool Tools::TrainUnit(BWAPI::UnitType unit) {
     return false;
 }
 
+bool Tools::TrainUnitAt(BWAPI::Unit producer, BWAPI::UnitType unit) {
+    if (!producer || !producer->isCompleted() || producer->isTraining() ||
+        producer->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return false;
+    // A train order is not deducted until BWAPI latency has passed; never stack a second one on it.
+    if (producer->getLastCommand().getType() == BWAPI::UnitCommandTypes::Train &&
+        BWAPI::Broodwar->getFrameCount() - producer->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames()) return false;
+    const auto reserve = GetConstructionReserve();
+    if (BWAPI::Broodwar->self()->minerals() - reserve.first < unit.mineralPrice() ||
+        BWAPI::Broodwar->self()->gas() - reserve.second < unit.gasPrice()) return false;
+    const bool accepted = producer->canTrain(unit) && producer->train(unit);
+    MatchLog::Command("train", unit.getName(), accepted);
+    return accepted;
+}
+
 bool Tools::HasPendingConstruction(BWAPI::Unit unit) {
     if (!unit || !unit->getType().isWorker()) return false;
     return unit->getLastCommand().getType() == BWAPI::UnitCommandTypes::Build &&

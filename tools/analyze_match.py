@@ -63,12 +63,17 @@ def summarize(path):
         "pressure_waves": sum(r.get("event") == "pressure_start" for r in records),
         "muta_raids": sum(r.get("event") == "harass_start" for r in records),
         "muta_raid_aborts": sum(r.get("event") == "harass_abort" for r in records),
+        "drone_defenses": sum(r.get("event") == "drone_defense" for r in records),
+        "static_assaults": sum(r.get("event") == "static_assault" for r in records),
+        "units_taken_over": sum(r.get("event") == "renegade" for r in records),
+        "opener": next((r.get("detail") for r in records if r.get("event") == "opener"), "pool_first"),
         "last_queen_support": support[-1] if support else None,
         "sampled_failures": [{"action": a, "type": t, "reason": reason, "samples": n}
                              for (a, t, reason), n in failures.most_common(10)],
         "decisions": [{"frame": r.get("frame"), "detail": r.get("detail")}
                       for r in records if r.get("event") in ("decision", "attack", "regroup", "pressure_start", "pressure_end", "surplus_expansion",
-                                                         "harass_start", "harass_abort", "harass_end")][-20:],
+                                                         "harass_start", "harass_abort", "harass_end", "drone_defense",
+                                                         "static_assault", "renegade")][-20:],
         "last_snapshot": snapshots[-1] if snapshots else None,
     }
 

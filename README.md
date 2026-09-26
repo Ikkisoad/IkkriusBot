@@ -255,6 +255,13 @@ either keep trading or disengage entirely.
   ignores targets under enemy colonies/cannons/bunkers/turrets, steps out of their range
   and advances behind the Guardian group instead of toward the enemy main. Static defense
   attacking our own bases is still fought normally.
+- **Stay out of static defense we will not kill**: without Guardians, enemy colonies,
+  cannons, bunkers and turrets are remembered through the fog of war, and units stay out of
+  their reach. An attack enters only when our units near a colony are 1.3x the colony (worth
+  12 power each), the colonies covering it and the enemy army nearby. A committed assault is
+  held for five seconds and dropped when it falls below 0.9x. Attack targets and map-control
+  spots under static defense are replaced with the edge of its reach, where the army gathers.
+  Logs record `static_assault`.
 - **Mutalisk raids**: while the main army is not attacking, a squad of 3–6 Mutalisks
   raids enemy mineral lines. Raiders prioritize workers, skip targets covered by static
   anti-air, travel as a flock, and send damaged members home to regenerate. The squad
@@ -301,12 +308,13 @@ units already built are kept after a switch.
 
 Two learners decide when and what to build:
 
-- **Genetic algorithm (step timing).** A genome of 27 genes sets when each step
+- **Genetic algorithm (step timing).** A genome of 30 genes sets when each step
   happens: pool/gas/expansion drone counts, Lair/Den/Spire/Queen's Nest/Hive/Greater
   Spire/Ultralisk Cavern timings, the Lurker research trigger, the rush drone cap,
   drone saturation, the army-to-drone ratio, Queen count, attack and retreat thresholds,
-  upgrade timing, switching margin and cooldown, and how much to trust the counter
-  table. Each enemy race has a population of 10 genomes. Each genome plays 2 matches.
+  upgrade timing, switching margin and cooldown, how much to trust the counter
+  table, and the opener (hatch first, and when Hive-bound builds take their third).
+  Saved populations from older builds load with default values for new genes. Each enemy race has a population of 10 genomes. Each genome plays 2 matches.
   The best 3 then survive, and the rest are rebuilt by tournament selection, uniform
   crossover, and Gaussian mutation.
 - **Reinforcement learning (composition choice).** A contextual bandit stores a value
@@ -359,6 +367,31 @@ Army and economy rules in the Adaptive build:
 - **Broodling fishing**: any Queen with Spawn Broodlings energy, idle or escorting, flies
   to a valuable ground unit (tanks, Templar, Lurkers, ...) that has little anti-air nearby,
   casts, and returns. A hunt that runs into anti-air is dropped for 45 seconds.
+- **Openers**: macro compositions (no rush) open hatch first when the `HatchFirst` gene is 0.5
+  or more. The natural goes down at `OpenerHatchDrones` (10-13) drones and the pool follows at
+  `PoolDrones`. Compositions that need Hive also take their third base at `EarlyThirdDrones`
+  (18-40) drones, without first saturating two bases. Both are evolved like the other genes, and
+  logs record `opener` and the `early_third` decision.
+- **Drone defense**: when enemy ground units attack a base and the army there cannot win
+  (army power below 1.3x the attackers), the nearest Drones fight too. Each Drone counts as
+  half a Zergling. The bot pulls only enough Drones to win and never pulls them into a fight
+  it would lose even with every Drone. Buildings going up next to the base (cannon or bunker
+  rushes) are attacked, and a passing worker scout is ignored. Drones below 16 HP, and Drones
+  no longer needed, go back to mining. Logs record `drone_defense`.
+- **Zergling squads**: Zerglings are grouped into squads of up to 24 within 8 tiles. Each squad
+  makes one scan and one fight decision instead of one per Zergling. A squad out of contact
+  gives new orders every 8 frames, with squads taking turns. Focus-fire counts are built once
+  per frame, which keeps a large Zergling count inside the frame budget.
+- **Queens with the army**: Queens without a Hydralisk group escort the air group, or else the
+  ground army's main body (a Ling/Ultralisk army). They trail it by 2 tiles, or 5 tiles when
+  out of energy, and move up with it when a spell is ready and enemies are near. A Queen above
+  half health walks into cast range of Ensnare and Broodling targets up to 12 tiles away.
+- **Infested Command Centers**: a Queen infests an enemy Command Center below half health
+  unless more than one anti-air unit guards it. A Command Center we take over is removed from
+  the remembered enemy bases and enemy tech (`renegade` event). Infested Command Centers train
+  up to 6 Infested Terrans each from spare resources. The Terrans follow the army and detonate
+  on static defense, sieged tanks, High Templar, Reavers, Lurkers or packed ground units, never
+  on one cheap unit or on top of our own army.
 - **Gas staffing**: one gas budget is split across all Extractors. At least 8 drones, and
   at least two thirds of all drones, stay on minerals. Gas is cut back when banked gas far
   exceeds minerals.

@@ -34,6 +34,8 @@ namespace Tools
 
     bool TryBuildBuilding(BWAPI::UnitType building, int limitAmount, BWAPI::TilePosition desiredPos);
     bool TrainUnit(BWAPI::UnitType unit);
+    // Train from a specific producer (an Infested Command Center), guarded against duplicate orders.
+    bool TrainUnitAt(BWAPI::Unit producer, BWAPI::UnitType unit);
     bool HasPendingConstruction(BWAPI::Unit unit);
     std::pair<int, int> GetConstructionReserve();
     bool MorphUnit(BWAPI::Unit source, BWAPI::UnitType type);

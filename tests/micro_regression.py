@@ -117,6 +117,7 @@ bool UseNydus(BWAPI::Unit,BWAPI::Position) { return nydusTaken; }
 }
 """
 source+='BWAPI::Position siegeEscort{-999}, groundObjective{-999};\n'
+source+='BWAPI::Position ControlPoint(BWAPI::Unit, BWAPI::Position rally) { return rally; }\n'
 source+=function('void Micro::SmartAttackMove')
 source+=function('void Micro::LurkerSupportLoop')
 source+=function('void Micro::GroundArmyLoop')
@@ -259,6 +260,39 @@ int main() {
     // Nydus for ground-heavy compositions, taken only when it saves real distance.
     assert(CombatPolicy::WantsNydus(0.5,false,2) && !CombatPolicy::WantsNydus(0.4,false,3) && !CombatPolicy::WantsNydus(1.0,true,2));
     assert(CombatPolicy::NydusShortcut(100,300,3000) && !CombatPolicy::NydusShortcut(100,2800,3000) && !CombatPolicy::NydusShortcut(900,0,5000));
+    // Drones join a defense the army cannot hold, only as many as it takes, and not into a hopeless fight.
+    assert(CombatPolicy::DronesToDefend(0,0,10)==0 && CombatPolicy::DronesToDefend(10,20,10)==0);
+    assert(CombatPolicy::DronesToDefend(12,0,12)==12); // Six Zerglings on an empty base: every Drone.
+    assert(CombatPolicy::DronesToDefend(12,8,12)==8);  // Our Zerglings hold part of it.
+    assert(CombatPolicy::DronesToDefend(1,0,12)==2);   // A lone attacking worker: a couple of Drones.
+    assert(CombatPolicy::DronesToDefend(60,0,20)==0);  // A whole army: Drones cannot change the result.
+    assert(CombatPolicy::DronesToDefend(12,4,0)==0);
+    // Zerglings are grouped into stable, bounded squads, and re-plan in turns while out of contact.
+    std::vector<P> lings;
+    for(int i=0;i<30;++i) lings.push_back({i*4,0});
+    lings.push_back({3000,0});
+    const auto squads=CombatPolicy::Squads(lings,CombatPolicy::ZerglingSquadRadius,CombatPolicy::ZerglingSquadSize);
+    assert(squads.size()==3 && squads[0].size()==24 && squads[1].size()==6 && squads[2].size()==1);
+    assert(squads[0][0]==0 && squads[1][0]==24 && squads[2][0]==30);
+    assert(CombatPolicy::Squads(std::vector<P>{},256,24).empty());
+    int due=0;
+    for(int f=0;f<CombatPolicy::SquadIdleOrderInterval*10;++f) due+=CombatPolicy::SquadOrdersDue(f,7);
+    assert(due==10);
+    // Static defense is only entered by an attack able to kill it, and a started assault is held while close.
+    assert(!CombatPolicy::AssaultStaticDefense(false,false,100,12)); // Not attacking: never walk into it.
+    assert(!CombatPolicy::AssaultStaticDefense(true,true,100,12));   // Guardians handle it.
+    assert(!CombatPolicy::AssaultStaticDefense(true,false,12,12) && CombatPolicy::AssaultStaticDefense(true,false,16,12));
+    assert(CombatPolicy::KeepAssault(11,12) && !CombatPolicy::KeepAssault(10,12));
+    // Queens stay with the army and step up to cast range when a spell is ready.
+    assert(CombatPolicy::QueenTrail(75,true)==0 && CombatPolicy::QueenTrail(75,false)==64 && CombatPolicy::QueenTrail(20,true)==160);
+    // Infested Terrans only blow up on something worth it, never on our own army.
+    assert(CombatPolicy::InfestedTerranScore(1,false,false,0)==0 && CombatPolicy::InfestedTerranScore(6,false,false,0)==6);
+    assert(CombatPolicy::InfestedTerranScore(0,true,false,0)==8 && CombatPolicy::InfestedTerranScore(2,false,true,0)==10);
+    assert(CombatPolicy::InfestedTerranScore(6,false,false,1)==0);
+    // Openers: macro compositions may go hatch first; Hive-bound ones take an early third.
+    assert(CombatPolicy::HatchFirst(false,0.75) && !CombatPolicy::HatchFirst(true,0.75) && !CombatPolicy::HatchFirst(false,0.2));
+    assert(CombatPolicy::EarlyThird(true,false,2,24,24) && !CombatPolicy::EarlyThird(false,false,2,30,24));
+    assert(!CombatPolicy::EarlyThird(true,true,2,30,24) && !CombatPolicy::EarlyThird(true,false,3,30,24) && !CombatPolicy::EarlyThird(true,false,2,23,24));
     std::cout << "Ground combat and Lurker regressions passed.\n";
 }
 """

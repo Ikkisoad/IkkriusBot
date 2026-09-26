@@ -129,7 +129,7 @@ void Adaptive::onStart() {
     BasesTools::SetOurBasePosition();
 
     m_enemyUnits.clear();
-    m_attacking = m_rushLaunched = m_openerDone = m_locked = false;
+    m_attacking = m_rushLaunched = m_openerDone = m_locked = m_loggedHatchFirst = false;
     m_lastAttackEndFrame = m_attackArmy = 0;
     m_nextExperimentFrame = FramesPerSecond * 60 * 4;
     m_reserveMinerals = m_reserveGas = 0;
@@ -167,7 +167,9 @@ void Adaptive::onStart() {
 // ---------------------------------------------------------------------------------------------
 
 void Adaptive::RememberEnemy(BWAPI::Unit unit) {
-    if (!unit || !BWAPI::Broodwar->self()->isEnemy(unit->getPlayer())) return;
+    if (!unit) return;
+    // A unit we took over (an infested Command Center) must not count as enemy tech or an enemy base.
+    if (!BWAPI::Broodwar->self()->isEnemy(unit->getPlayer())) { m_enemyUnits.erase(unit->getID()); return; }
     m_enemyUnits[unit->getID()] = unit->getType();
     const auto race = unit->getType().getRace();
     if (race == BWAPI::Races::Terran || race == BWAPI::Races::Protoss || race == BWAPI::Races::Zerg)
@@ -177,6 +179,12 @@ void Adaptive::RememberEnemy(BWAPI::Unit unit) {
 void Adaptive::onUnitShow(BWAPI::Unit unit) { RememberEnemy(unit); }
 void Adaptive::onUnitMorph(BWAPI::Unit unit) { RememberEnemy(unit); }
 void Adaptive::onUnitDestroy(BWAPI::Unit unit) { if (unit) m_enemyUnits.erase(unit->getID()); }
+void Adaptive::onUnitRenegade(BWAPI::Unit unit) {
+    RememberEnemy(unit);
+    if (!unit || unit->getPlayer() != BWAPI::Broodwar->self()) return;
+    BasesTools::RemoveEnemyBasePosition(unit->getPosition());
+    MatchLog::Event("renegade", unit->getType().getName());
+}
 
 Learning::EnemyProfile Adaptive::BuildProfile() const {
     Learning::EnemyProfile profile;
@@ -377,6 +385,7 @@ void Adaptive::Execute() {
         if (!emergency) TryExperiment(counts);
         MorphAdvancedUnits(counts);
         SpendArmyBudget(counts);
+        InfestedTerrans(emergency);
         SpendExcessMinerals(counts, emergency);
 
         // Sunkens only where ground threats are actually hitting a base.
@@ -436,6 +445,24 @@ void Adaptive::AssignGasWorkers() {
 
 void Adaptive::Opener(const Counts& counts) {
     const auto start = BWAPI::Broodwar->self()->getStartLocation();
+    // Macro compositions may open hatch first: the natural goes down before the pool.
+    if (Started(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0 && counts.miningSites < 2 &&
+        CombatPolicy::HatchFirst(Learning::Spec(m_composition).rush, m_genome.Get(Gene::HatchFirst)) &&
+        !Tools::IsQueued(BWAPI::UnitTypes::Zerg_Hatchery).isValid()) {
+        const auto natural = BasesTools::GetNextExpansionPosition();
+        if (natural.isValid()) {
+            if (counts.drones < m_genome.GetInt(Gene::OpenerHatchDrones)) Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Drone);
+            else {
+                m_reserveMinerals = 300;
+                m_decision = "hatch_first";
+                if (Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, natural) && !m_loggedHatchFirst) {
+                    m_loggedHatchFirst = true;
+                    MatchLog::Event("opener", "hatch_first drones=" + std::to_string(counts.drones));
+                }
+            }
+            return;
+        }
+    }
     if (Started(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) {
         if (counts.drones < m_genome.GetInt(Gene::PoolDrones)) Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Drone);
         else {
@@ -568,18 +595,21 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     const bool later = counts.miningSites >= 2 && counts.miningSites < 6 &&
         counts.drones >= m_genome.GetInt(Gene::ThirdBaseDrones) + (counts.miningSites - 2) * perBase &&
         counts.drones >= counts.miningSites * perBase - 4 && !RushPending();
+    // Headed for Hive: the third base goes down early instead of after saturating two bases.
+    const bool earlyThird = CombatPolicy::EarlyThird(Needs(m_composition, Tech::Hive), RushPending(), counts.miningSites,
+        counts.drones, m_genome.GetInt(Gene::EarlyThirdDrones));
     // Every patch already has two miners: the spare drones go and take a new base.
     const bool saturated = mining.mineralSlots > 0 && counts.miningSites < 8 && !RushPending() &&
         mining.mineralWorkers + mining.idleWorkers >= mining.mineralSlots && mining.idleWorkers > 0;
     // Guardians holding the enemy's next base are the moment to take more of our own.
     const bool contain = CombatPolicy::ContainExpansion(Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Guardian),
         counts.miningSites, counts.drones);
-    if (natural || later || surplus || saturated || contain) {
+    if (natural || later || earlyThird || surplus || saturated || contain) {
         const auto expansion = BasesTools::GetNextExpansionPosition();
         if (expansion.isValid()) {
             m_reserveMinerals = std::max(m_reserveMinerals, 300);
             m_decision = surplus ? "surplus_expand" : saturated ? "saturated_expand" :
-                contain && !natural && !later ? "contain_expand" : "expand";
+                earlyThird && !later ? "early_third" : contain && !natural && !later ? "contain_expand" : "expand";
             Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, expansion);
             return;
         }
@@ -899,6 +929,31 @@ void Adaptive::LateGameSupport(const Counts& counts) {
     if (defilers < target && Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Defiler)) {
         m_decision = "defiler";
         MatchLog::Event("defiler", "count=" + std::to_string(defilers + 1) + " target=" + std::to_string(target));
+    }
+}
+
+// Infested Command Centers turn spare minerals and gas into Infested Terrans: suicide units the
+// micro spends on static defense, sieged tanks and packed ground armies.
+void Adaptive::InfestedTerrans(bool emergency) {
+    const auto self = BWAPI::Broodwar->self();
+    const auto type = BWAPI::UnitTypes::Zerg_Infested_Terran;
+    int centers = 0;
+    for (auto unit : self->getUnits())
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Infested_Command_Center && unit->isCompleted()) ++centers;
+    if (centers == 0) return;
+    int infested = Started(type);
+    for (auto center : self->getUnits()) {
+        if (infested >= centers * CombatPolicy::InfestedTerransPerCenter) return;
+        if (center->getType() != BWAPI::UnitTypes::Zerg_Infested_Command_Center || !center->isCompleted() ||
+            center->isTraining()) continue;
+        // Planned tech and units keep their resources, unless a base is under attack.
+        const int minerals = self->minerals() - (emergency ? 0 : m_reserveMinerals) - PendingOrderMinerals();
+        const int gas = self->gas() - (emergency ? 0 : m_reserveGas);
+        if (minerals < type.mineralPrice() || gas < type.gasPrice() ||
+            self->supplyTotal() - self->supplyUsed() < type.supplyRequired()) return;
+        if (!Tools::TrainUnitAt(center, type)) continue;
+        ++infested;
+        m_decision = "infested_terran";
     }
 }
 

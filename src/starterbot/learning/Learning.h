@@ -65,6 +65,7 @@ namespace Learning {
         ThirdBaseDrones, DronesPerBase, MaxDrones, ArmyPerDrone, QueenCount,
         RushAttackSupply, AttackSupply, RetreatFraction, UpgradeArmySupply,
         SwitchMargin, SwitchCooldownSeconds, CounterWeight,
+        HatchFirst, OpenerHatchDrones, EarlyThirdDrones,
         Count
     };
     constexpr int GeneCount = static_cast<int>(Gene::Count);

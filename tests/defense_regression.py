@@ -20,6 +20,7 @@ def function(signature):
 source = r'''
 #include <cassert>
 #include <set>
+#include <vector>
 #include <cstdlib>
 #include <iostream>
 namespace BWAPI {

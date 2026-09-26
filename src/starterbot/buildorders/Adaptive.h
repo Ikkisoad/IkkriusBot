@@ -16,6 +16,8 @@ public:
     void onUnitShow(BWAPI::Unit unit) override;
     void onUnitMorph(BWAPI::Unit unit) override;
     void onUnitDestroy(BWAPI::Unit unit) override;
+    // A unit that changed hands (an infested Command Center) is no longer remembered as the enemy's.
+    void onUnitRenegade(BWAPI::Unit unit) override;
     void onSendText(std::string text) override;
     std::string GetName() const override { return "Adaptive"; }
 
@@ -44,6 +46,7 @@ private:
     bool m_attacking = false;
     bool m_rushLaunched = false;
     bool m_openerDone = false;
+    bool m_loggedHatchFirst = false;
     int m_lastAttackEndFrame = 0;  // When the army last stood down (or the match start).
     int m_attackArmy = 0;          // Army supply the current attack left with.
     int m_nextExperimentFrame = 0;
@@ -80,6 +83,8 @@ private:
     void AssignGasWorkers();
     void NydusNetwork(const Counts& counts);
     void LateGameSupport(const Counts& counts);
+    // Infested Command Centers train Infested Terrans.
+    void InfestedTerrans(bool emergency);
     int ScourgeWanted(const Counts& counts) const;
     void TryExperiment(const Counts& counts);
     int KnownEnemyArmySupply() const;

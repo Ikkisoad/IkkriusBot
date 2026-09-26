@@ -26,13 +26,18 @@ namespace Micro {
 // React to visible threats at every depot, including expansions under construction.
 BWAPI::Unitset Micro::GetBaseThreats() {
     BWAPI::Unitset threats;
+    // Depots first: scanning every unit we own for each enemy does not scale with a big army.
+    std::vector<BWAPI::Unit> depots;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits())
+        if (unit->getType().isResourceDepot()) depots.push_back(unit);
+    if (depots.empty()) return threats;
     for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
         if (!enemy->exists() || !enemy->isVisible() ||
             !BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer())) continue;
         if (!enemy->getType().canAttack() && !enemy->getType().isSpellcaster() &&
             enemy->getType() != BWAPI::UnitTypes::Terran_Bunker) continue;
-        for (auto depot : BWAPI::Broodwar->self()->getUnits()) {
-            if (depot->getType().isResourceDepot() && depot->getDistance(enemy) <= 12 * 32) {
+        for (auto depot : depots) {
+            if (depot->getDistance(enemy) <= 12 * 32) {
                 threats.insert(enemy);
                 break;
             }
@@ -52,6 +57,114 @@ bool Micro::DefendBases(BWAPI::Unit unit, const BWAPI::Unitset& threats) {
     if (!target) return false;
     SmartAttackUnit(unit, target);
     return true;
+}
+
+namespace {
+    double CombatPower(BWAPI::Unit unit) {
+        const auto type = unit->getType();
+        if (!type.canAttack() || type.isWorker()) return 0;
+        return std::max(2, type.supplyRequired()) *
+            double(unit->getHitPoints() + unit->getShields()) / std::max(1, type.maxHitPoints() + type.maxShields());
+    }
+
+    // Drones currently pulled off the minerals to fight at a base.
+    std::set<int> droneDefenders;
+    constexpr int DroneDefenseRadius = 8 * 32;   // Enemies this close to a depot are fought by its drones.
+    constexpr int DroneGatherRadius = 10 * 32;   // Drones and army this close to the depot join in.
+    constexpr int DroneRetreatHitPoints = 16;    // A drone this hurt goes back to mining.
+
+    // Local power as the drones see it: an enemy worker fights like a drone, a building going up is worth
+    // killing with a few drones before it finishes, completed static defense is left to the army.
+    double DroneFightPower(BWAPI::Unit enemy) {
+        const auto type = enemy->getType();
+        if (type.isWorker()) return CombatPolicy::DronePower;
+        if (type.isBuilding()) return enemy->isCompleted() ? 0.0 : 2.0;
+        if (!type.canAttack()) return 0.0;
+        return std::max(2, type.supplyRequired()) *
+            double(enemy->getHitPoints() + enemy->getShields()) / std::max(1, type.maxHitPoints() + type.maxShields());
+    }
+}
+
+BWAPI::Unitset Micro::DefendWithDrones(const BWAPI::Unitset& threats) {
+    const auto self = BWAPI::Broodwar->self();
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    BWAPI::Unitset fighting;
+    std::set<int> pulled;
+    for (auto depot : self->getUnits()) {
+        if (!depot->getType().isResourceDepot() || !depot->isCompleted() || threats.empty()) continue;
+        // Enemies drones can fight here: on the ground, visible, not completed static defense, and workers only
+        // when they attack or build (a passing scout is not worth a mineral line).
+        BWAPI::Unitset enemies;
+        double enemyPower = 0;
+        for (auto threat : threats) {
+            if (!threat->exists() || threat->isFlying() || !threat->isDetected() || depot->getDistance(threat) > DroneDefenseRadius) continue;
+            const auto type = threat->getType();
+            if (type.isWorker() && !threat->isAttacking() && !threat->isConstructing()) continue;
+            const double power = DroneFightPower(threat);
+            if (power <= 0) continue;
+            enemies.insert(threat);
+            enemyPower += power;
+        }
+        // Buildings going up next to the base (cannon or bunker rush) are not "threats" until they finish.
+        for (auto enemy : depot->getUnitsInRadius(DroneDefenseRadius, BWAPI::Filter::IsEnemy)) {
+            if (!enemy->isVisible() || !enemy->getType().isBuilding() || enemy->isCompleted() || enemies.contains(enemy)) continue;
+            enemies.insert(enemy);
+            enemyPower += DroneFightPower(enemy);
+        }
+        if (enemies.empty()) continue;
+        double armyPower = 0;
+        std::vector<BWAPI::Unit> drones;
+        for (auto unit : depot->getUnitsInRadius(DroneGatherRadius, BWAPI::Filter::IsOwned)) {
+            if (!unit->exists() || !unit->isCompleted()) continue;
+            const auto type = unit->getType();
+            if (type == BWAPI::UnitTypes::Zerg_Drone) {
+                if (!unit->isConstructing() && !Tools::HasPendingConstruction(unit) && !unit->isMorphing() &&
+                    unit->getHitPoints() > DroneRetreatHitPoints && !pulled.count(unit->getID())) drones.push_back(unit);
+            } else if (type == BWAPI::UnitTypes::Zerg_Sunken_Colony) armyPower += CombatPolicy::StaticDefensePower;
+            else if (!type.isBuilding() && type.canAttack() && !unit->isFlying()) armyPower += CombatPower(unit);
+        }
+        const int wanted = CombatPolicy::DronesToDefend(enemyPower, armyPower, static_cast<int>(drones.size()));
+        if (wanted == 0) continue;
+        // The drones closest to the fight go; the rest keep mining.
+        int x = 0, y = 0;
+        for (auto enemy : enemies) { x += enemy->getPosition().x; y += enemy->getPosition().y; }
+        const BWAPI::Position center(x / static_cast<int>(enemies.size()), y / static_cast<int>(enemies.size()));
+        std::sort(drones.begin(), drones.end(), [center](BWAPI::Unit a, BWAPI::Unit b) {
+            return a->getDistance(center) != b->getDistance(center) ? a->getDistance(center) < b->getDistance(center) : a->getID() < b->getID();
+        });
+        drones.resize(wanted);
+        // Logged when a base starts pulling drones, not on every frame of the fight.
+        bool alreadyFighting = false;
+        for (auto drone : drones) alreadyFighting = alreadyFighting || droneDefenders.count(drone->getID()) > 0;
+        if (!alreadyFighting)
+            MatchLog::Event("drone_defense", "drones=" + std::to_string(wanted) + " enemy=" + std::to_string(int(enemyPower)) +
+                " army=" + std::to_string(int(armyPower)));
+        for (auto drone : drones) {
+            // Units that fight back first, then workers, then buildings going up; nearest within each.
+            BWAPI::Unit target = nullptr;
+            const auto rank = [](BWAPI::Unit enemy) { return enemy->getType().isBuilding() ? 2 : enemy->getType().isWorker() ? 1 : 0; };
+            for (auto enemy : enemies)
+                if (!target || rank(enemy) < rank(target) || (rank(enemy) == rank(target) && drone->getDistance(enemy) < drone->getDistance(target)))
+                    target = enemy;
+            if (!target) continue;
+            pulled.insert(drone->getID());
+            fighting.insert(drone);
+            SmartAttackUnit(drone, target);
+        }
+    }
+    // Drones no longer needed go straight back to work; each is tracked until its attack order is replaced.
+    auto still = pulled;
+    for (int id : droneDefenders) {
+        if (pulled.count(id)) continue;
+        const auto drone = BWAPI::Broodwar->getUnit(id);
+        if (!drone || !drone->exists() || drone->getPlayer() != self ||
+            drone->getLastCommand().getType() != BWAPI::UnitCommandTypes::Attack_Unit) continue;
+        // No free patch: stop, and the idle-worker handling finds it work.
+        if (!Tools::GatherNearestBaseMinerals(drone) && drone->getLastCommandFrame() < frame) drone->stop();
+        still.insert(id);
+    }
+    droneDefenders = still;
+    return fighting;
 }
 
 void Micro::SmartAttackUnit(BWAPI::Unit attacker, BWAPI::Unit target)
@@ -822,15 +935,6 @@ void Micro::Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal) {
     return;
 }
 
-namespace {
-    double CombatPower(BWAPI::Unit unit) {
-        const auto type = unit->getType();
-        if (!type.canAttack() || type.isWorker()) return 0;
-        return std::max(2, type.supplyRequired()) *
-            double(unit->getHitPoints() + unit->getShields()) / std::max(1, type.maxHitPoints() + type.maxShields());
-    }
-}
-
 // Compare the strength of our units around this one against the enemies able to hurt it.
 Micro::LocalFight Micro::AssessLocalFight(BWAPI::Unit unit, int radius) {
     LocalFight fight;
@@ -856,6 +960,23 @@ Micro::LocalFight Micro::AssessLocalFight(BWAPI::Unit unit, int radius) {
     return fight;
 }
 
+namespace {
+    // How many of our units are ordered onto each target, counted once per frame for every focus-fire choice.
+    std::map<int, int> attackersOnTarget;
+    int attackersFrame = -1;
+    int AttackersOn(BWAPI::Unit enemy) {
+        const int frame = BWAPI::Broodwar->getFrameCount();
+        if (attackersFrame != frame) {
+            attackersFrame = frame;
+            attackersOnTarget.clear();
+            for (auto ally : BWAPI::Broodwar->self()->getUnits())
+                if (const auto target = ally->getOrderTarget()) ++attackersOnTarget[target->getID()];
+        }
+        const auto found = attackersOnTarget.find(enemy->getID());
+        return found == attackersOnTarget.end() ? 0 : found->second;
+    }
+}
+
 // Pick a target the whole nearby group can agree on instead of each unit chasing its nearest enemy.
 BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferWorkers) {
     if (!unit) return nullptr;
@@ -874,10 +995,7 @@ BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& can
         else if (!type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Larva && type != BWAPI::UnitTypes::Zerg_Egg) tier = 2;
         else if (type.isBuilding() && enemy->isCompleted()) tier = 3;
         if (preferWorkers && tier <= 1) tier = 1 - tier;
-        int allies = 0;
-        for (auto ally : enemy->getUnitsInRadius(320, BWAPI::Filter::IsOwned)) {
-            if (ally != unit && ally->getOrderTarget() == enemy) ++allies;
-        }
+        const int allies = AttackersOn(enemy) - (unit->getOrderTarget() == enemy ? 1 : 0);
         const int maxHp = std::max(1, type.maxHitPoints() + type.maxShields());
         const double hpFraction = double(enemy->getHitPoints() + enemy->getShields()) / maxHp;
         const double score = CombatPolicy::FocusScore(tier, unit->getDistance(enemy), ownWeapon.maxRange(), hpFraction, allies);
@@ -917,18 +1035,34 @@ void Micro::FallBack(BWAPI::Unit unit, BWAPI::Unit threat, BWAPI::Position ancho
     SmartMove(unit, destination);
 }
 namespace {
-    // Enemy static defense the army leaves to Guardians, with each colony's reach, rebuilt every frame.
-    std::vector<std::pair<BWAPI::Unit, int>> groundCover, airCover;
+    // Enemy static defense the army stays out of, with each colony's reach, rebuilt every frame: all of it
+    // while Guardians siege (they outrange it), otherwise every colony no attack is strong enough to kill.
+    struct Cover { BWAPI::Position position; int reach = 0; };
+    std::vector<Cover> groundCover, airCover;
+    // Static defense is remembered through the fog: a cannon does not go away because we stopped seeing it.
+    struct KnownDefense { BWAPI::Unit unit = nullptr; BWAPI::Position position; int ground = -1, air = -1; };
+    std::map<int, KnownDefense> knownDefenses;
+    // Committed assaults by colony ID: held until the first frame, re-evaluated from the second.
+    std::map<int, int> assaultUntil, assaultCheck;
+    // Colonies are remembered by their center; this turns that into an approximate distance to their edge.
+    constexpr int DefenseHalfSize = 32;
+    int CoverDistance(BWAPI::Unit unit, const Cover& cover) { return std::max(0, unit->getDistance(cover.position) - DefenseHalfSize); }
+    int CoverDistance(BWAPI::Position point, const Cover& cover) { return std::max(0, point.getApproxDistance(cover.position) - DefenseHalfSize); }
+    bool GroundCovered(BWAPI::Position point, int margin) {
+        for (const auto& cover : groundCover)
+            if (CoverDistance(point, cover) <= cover.reach + margin) return true;
+        return false;
+    }
     // Where the ground army advances while Guardians siege; None means the enemy main.
     BWAPI::Position siegeEscort = BWAPI::Positions::None;
     // The known enemy base closest to the ground army's main body; None means the enemy main.
     BWAPI::Position groundObjective = BWAPI::Positions::None;
 }
 
-// True when `enemy` sits inside static defense that could hit `unit` while Guardians are available to siege it.
+// True when `enemy` sits inside enemy static defense that `unit` is staying out of.
 bool Micro::AvoidsStaticDefense(BWAPI::Unit unit, BWAPI::Unit enemy) {
     for (const auto& cover : unit->isFlying() ? airCover : groundCover)
-        if (cover.first->getDistance(enemy) <= cover.second + 32) return true;
+        if (CoverDistance(enemy, cover) <= cover.reach + 32) return true;
     return false;
 }
 
@@ -1008,6 +1142,89 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
     SmartAttackMove(unit, destination);
 }
 
+void Micro::ZerglingSquadLoop(const BWAPI::Unitset& zerglings, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position body) {
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    const auto self = BWAPI::Broodwar->self();
+    const bool aggressive = GetMode() == MicroMode::Aggressive;
+    std::vector<BWAPI::Unit> lings(zerglings.begin(), zerglings.end());
+    std::sort(lings.begin(), lings.end(), [](BWAPI::Unit a, BWAPI::Unit b) { return a->getID() < b->getID(); });
+    std::vector<BWAPI::Position> positions;
+    for (auto ling : lings) positions.push_back(ling->getPosition());
+    for (const auto& squad : CombatPolicy::Squads(positions, CombatPolicy::ZerglingSquadRadius, CombatPolicy::ZerglingSquadSize)) {
+        const auto anchor = lings[squad.front()];
+        int x = 0, y = 0;
+        for (int i : squad) { x += positions[i].x; y += positions[i].y; }
+        const BWAPI::Position center(x / static_cast<int>(squad.size()), y / static_cast<int>(squad.size()));
+        int span = 0;
+        for (int i : squad) span = std::max(span, positions[i].getApproxDistance(center));
+
+        // Where the squad goes when it has nothing to fight: the same plan as the rest of the ground army.
+        const auto destination = [&]() {
+            if (!aggressive) return threats.empty() ? ControlPoint(anchor, rally) : rally;
+            const auto target = siegeEscort.isValid() ? siegeEscort :
+                groundObjective.isValid() ? groundObjective : BasesTools::GetEnemyBasePosition();
+            // Squads running ahead of the main body wait for it; the rest keep marching.
+            if (target.isValid() && body.isValid() && CombatPolicy::WaitForMainBody(center.getApproxDistance(target),
+                body.getApproxDistance(target), center.getApproxDistance(body))) return body;
+            return target;
+        };
+        const auto march = [&](BWAPI::Unit ling, BWAPI::Position point) {
+            if (!point.isValid()) ScoutAndWander(ling);
+            else if (!UseNydus(ling, point)) SmartAttackMove(ling, point);
+        };
+
+        // Base defense: each ling takes the nearest ground threat.
+        std::vector<int> available;
+        for (int i : squad) {
+            BWAPI::Unit target = nullptr;
+            for (auto threat : threats) {
+                if (threat->isFlying() || !threat->isDetected()) continue;
+                if (!target || lings[i]->getDistance(threat) < lings[i]->getDistance(target)) target = threat;
+            }
+            if (target) SmartAttackUnit(lings[i], target);
+            else available.push_back(i);
+        }
+        if (available.empty()) continue;
+
+        // One scan for the whole squad: the power balance and the targets around it. Anything under static
+        // defense we are staying out of is neither a target nor a reason to run.
+        double friendlyPower = 0, enemyPower = 0;
+        BWAPI::Unitset candidates;
+        for (auto nearby : BWAPI::Broodwar->getUnitsInRadius(center, span + 320)) {
+            if (!nearby->exists() || !nearby->isCompleted()) continue;
+            const auto type = nearby->getType();
+            if (nearby->getPlayer() == self) { friendlyPower += CombatPower(nearby); continue; }
+            if (!self->isEnemy(nearby->getPlayer()) || !nearby->isVisible() || AvoidsStaticDefense(anchor, nearby)) continue;
+            if (type.groundWeapon() != BWAPI::WeaponTypes::None || type == BWAPI::UnitTypes::Terran_Bunker)
+                enemyPower += type.isBuilding() ? CombatPower(nearby) + 6 : CombatPower(nearby);
+            if (nearby->isDetected() && !nearby->isFlying()) candidates.insert(nearby);
+        }
+
+        const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower, CombatPolicy::TakeCloseFight(frame));
+        // Losing the local fight (including to enemies lings cannot hit, like air): fall back to the rally.
+        if (engagement == CombatPolicy::Engagement::Withdraw) {
+            for (int i : available) SmartMove(lings[i], rally);
+            continue;
+        }
+        if (candidates.empty()) {
+            // Out of contact: standing orders are kept until the squad's turn to re-plan, except for idle lings.
+            const bool due = CombatPolicy::SquadOrdersDue(frame, anchor->getID());
+            const auto point = destination();
+            for (int i : available)
+                if (due || lings[i]->isIdle()) march(lings[i], point);
+            continue;
+        }
+        for (int i : available) {
+            const auto ling = lings[i];
+            const auto target = ChooseFocusTarget(ling, candidates, false);
+            if (!target) { march(ling, destination()); continue; }
+            if (CombatPolicy::ShouldStepBack(engagement, false, ling->getGroundWeaponCooldown(), ling->getHitPoints(),
+                ling->getType().maxHitPoints())) { FallBack(ling, target, center); continue; }
+            SmartAttackUnit(ling, target);
+        }
+    }
+}
+
 namespace {
     std::map<int, int> lurkerLastContact;
     BWAPI::Position UnitCenter(const BWAPI::Unitset& units, BWAPI::Position fallback) {
@@ -1033,10 +1250,10 @@ namespace {
     int ThreatMargin(BWAPI::Unit enemy) { return enemy->getType().isBuilding() ? 32 : 64; }
 
     // Step directly away from every threat at once; flyers ignore terrain.
-    BWAPI::Position AwayFrom(BWAPI::Unit unit, const std::vector<BWAPI::Unit>& threats, BWAPI::Position fallback) {
+    BWAPI::Position AwayFromPoints(BWAPI::Unit unit, const std::vector<BWAPI::Position>& threats, BWAPI::Position fallback) {
         double dx = 0, dy = 0;
         for (auto threat : threats) {
-            const double x = unit->getPosition().x - threat->getPosition().x, y = unit->getPosition().y - threat->getPosition().y;
+            const double x = unit->getPosition().x - threat.x, y = unit->getPosition().y - threat.y;
             const double length = std::max(1.0, std::sqrt(x * x + y * y));
             dx += x / length; dy += y / length;
         }
@@ -1045,6 +1262,11 @@ namespace {
         BWAPI::Position away(unit->getPosition().x + int(96 * dx / length), unit->getPosition().y + int(96 * dy / length));
         away.makeValid();
         return away;
+    }
+    BWAPI::Position AwayFrom(BWAPI::Unit unit, const std::vector<BWAPI::Unit>& threats, BWAPI::Position fallback) {
+        std::vector<BWAPI::Position> points;
+        for (auto threat : threats) points.push_back(threat->getPosition());
+        return AwayFromPoints(unit, points, fallback);
     }
 
     // Reach of an enemy colony, cannon, bunker or turret against ground or air units; -1 when it cannot hit them.
@@ -1134,7 +1356,9 @@ namespace {
         }
         for (auto it = enemyDepots.begin(); it != enemyDepots.end();) {
             const auto depot = BWAPI::Broodwar->getUnit(it->first);
-            if (BWAPI::Broodwar->isVisible(BWAPI::TilePosition(it->second)) && (!depot || !depot->exists())) it = enemyDepots.erase(it);
+            // Gone, or taken over (an infested Command Center is ours now, not a base to attack).
+            if ((BWAPI::Broodwar->isVisible(BWAPI::TilePosition(it->second)) && (!depot || !depot->exists())) ||
+                (depot && depot->exists() && !BWAPI::Broodwar->self()->isEnemy(depot->getPlayer()))) it = enemyDepots.erase(it);
             else ++it;
         }
         harassAvoid.erase(std::remove_if(harassAvoid.begin(), harassAvoid.end(),
@@ -1227,29 +1451,86 @@ namespace {
         return best.isValid() ? best : enemyMain;
     }
 
-    // Rebuild the static defense the army should leave to Guardians; colonies raiding our own bases are exempt.
-    void UpdateStaticCover(bool active, const BWAPI::Unitset& baseThreats) {
-        groundCover.clear(); airCover.clear();
-        if (!active) return;
+    // An attack goes in on a colony only with the power to kill it: our combat units around it against the
+    // colony, every colony covering it and the enemy army standing by. Committed assaults are held for a
+    // few seconds and dropped only once the trade is clearly lost, so the army does not dance at the edge.
+    bool Assaulting(int id, const KnownDefense& defense, bool attacking, bool guardians, int frame) {
+        if (!attacking || guardians) { assaultUntil.erase(id); assaultCheck.erase(id); return false; }
+        auto& until = assaultUntil[id];
+        auto& check = assaultCheck[id];
+        if (frame < check) return until > frame;
+        check = frame + 12;
+        const int reach = std::max(defense.ground, defense.air);
+        double friendly = 0, enemy = 0;
+        for (auto unit : BWAPI::Broodwar->getUnitsInRadius(defense.position, reach + 384)) {
+            if (!unit->exists() || !unit->isCompleted()) continue;
+            if (unit->getPlayer() == BWAPI::Broodwar->self()) friendly += CombatPower(unit);
+            else if (BWAPI::Broodwar->self()->isEnemy(unit->getPlayer()) && unit->isVisible() && !unit->getType().isBuilding() &&
+                     unit->getPosition().getApproxDistance(defense.position) <= reach + 192) enemy += CombatPower(unit);
+        }
+        for (const auto& known : knownDefenses)
+            if (known.second.position.getApproxDistance(defense.position) <=
+                std::max(known.second.ground, known.second.air) + DefenseHalfSize * 2) enemy += CombatPolicy::StaticDefensePower;
+        if (CombatPolicy::AssaultStaticDefense(attacking, guardians, friendly, enemy)) {
+            if (until <= frame) MatchLog::Event("static_assault", "power=" + std::to_string(int(friendly)) + " defense=" + std::to_string(int(enemy)));
+            until = frame + CombatPolicy::StaticAssaultHoldFrames;
+        } else if (!CombatPolicy::KeepAssault(friendly, enemy)) until = 0;
+        return until > frame;
+    }
+
+    // Rebuild the static defense the army stays out of. With Guardians out that is all of it; otherwise every
+    // colony not under a committed assault. Colonies raiding our own bases are exempt: they are fought.
+    void UpdateStaticCover(bool guardians, const BWAPI::Unitset& baseThreats) {
+        const int frame = BWAPI::Broodwar->getFrameCount();
+        const auto self = BWAPI::Broodwar->self();
         for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
-            if (!enemy->exists() || !enemy->isVisible() || !BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer()) ||
-                baseThreats.contains(enemy)) continue;
+            if (!enemy->exists() || !enemy->isVisible() || !self->isEnemy(enemy->getPlayer())) continue;
             const int ground = StaticReach(enemy, false), air = StaticReach(enemy, true);
-            if (ground >= 0) groundCover.push_back({enemy, ground});
-            if (air >= 0) airCover.push_back({enemy, air});
+            if (ground >= 0 || air >= 0) knownDefenses[enemy->getID()] = {enemy, enemy->getPosition(), ground, air};
+        }
+        // Forget a colony once its spot is in sight and it is gone, or no longer the enemy's.
+        for (auto it = knownDefenses.begin(); it != knownDefenses.end();) {
+            const auto unit = it->second.unit;
+            if (BWAPI::Broodwar->isVisible(BWAPI::TilePosition(it->second.position)) &&
+                (!unit->exists() || !self->isEnemy(unit->getPlayer()))) {
+                assaultUntil.erase(it->first); assaultCheck.erase(it->first);
+                it = knownDefenses.erase(it);
+            } else ++it;
+        }
+        groundCover.clear(); airCover.clear();
+        const bool attacking = Micro::GetMode() == Micro::MicroMode::Aggressive;
+        for (const auto& [id, defense] : knownDefenses) {
+            if (baseThreats.contains(defense.unit)) continue;
+            if (Assaulting(id, defense, attacking, guardians, frame)) continue;
+            if (defense.ground >= 0) groundCover.push_back({defense.position, defense.ground});
+            if (defense.air >= 0) airCover.push_back({defense.position, defense.air});
         }
     }
 
-    // Step out of static defense the Guardians will kill, rather than trading units into it.
+    // Step out of static defense we are not going to kill, rather than trading units into it.
     bool KeepOutOfStaticDefense(BWAPI::Unit unit, BWAPI::Position fallback) {
         if (unit->isBurrowed()) return false;
-        std::vector<BWAPI::Unit> inReach;
+        std::vector<BWAPI::Position> inReach;
         for (const auto& cover : unit->isFlying() ? airCover : groundCover)
-            if (unit->getDistance(cover.first) <= cover.second + 32) inReach.push_back(cover.first);
+            if (CoverDistance(unit, cover) <= cover.reach + 32) inReach.push_back(cover.position);
         if (inReach.empty()) return false;
-        BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Leave to Guardians");
-        Micro::SmartMove(unit, AwayFrom(unit, inReach, fallback));
+        BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Avoid static defense");
+        const auto away = AwayFromPoints(unit, inReach, fallback);
+        Micro::SmartMove(unit, unit->isFlying() || BWAPI::Broodwar->isWalkable(BWAPI::WalkPosition(away)) ? away : fallback);
         return true;
+    }
+
+    // A destination inside static defense we are not assaulting becomes the first point outside its reach on
+    // the way from `from`: the army gathers there, instead of walking into the fire one unit at a time.
+    BWAPI::Position SafeObjective(BWAPI::Position from, BWAPI::Position destination) {
+        if (!destination.isValid() || !from.isValid() || !GroundCovered(destination, 64)) return destination;
+        const double dx = from.x - destination.x, dy = from.y - destination.y;
+        const double length = std::sqrt(dx * dx + dy * dy);
+        for (double travelled = 64; travelled < length; travelled += 64) {
+            const BWAPI::Position point(destination.x + int(dx * travelled / length), destination.y + int(dy * travelled / length));
+            if (!GroundCovered(point, 64)) return point;
+        }
+        return from;
     }
 
     // An idle unit still takes a free kill instead of just standing at its rally point: attack
@@ -1269,19 +1550,27 @@ namespace {
 
     // Idle offensive units spread across the map for control/vision instead of clumping at the
     // rally point when nothing is attacking us. Assignment is stable per unit ID so a unit does
-    // not reshuffle to a different spot every frame.
+    // not reshuffle to a different spot every frame. Known enemy bases and anything under enemy
+    // static defense are not "control": units parked there just die. Spots are built once per frame.
+    std::vector<BWAPI::Position> controlSpots;
+    int controlFrame = -1;
     BWAPI::Position ControlPoint(BWAPI::Unit unit, BWAPI::Position rally) {
-        const auto& bases = BasesTools::GetAllBasePositions();
-        if (bases.empty()) return rally;
-        std::vector<BWAPI::Position> spots;
-        for (const auto& base : bases) {
-            bool ours = false;
+        const int frame = BWAPI::Broodwar->getFrameCount();
+        if (controlFrame != frame) {
+            controlFrame = frame;
+            controlSpots.clear();
+            std::vector<BWAPI::Unit> depots;
             for (auto depot : BWAPI::Broodwar->self()->getUnits())
-                ours = ours || (depot->getType().isResourceDepot() && depot->getDistance(base) <= 320);
-            if (!ours) spots.push_back(base);
+                if (depot->getType().isResourceDepot()) depots.push_back(depot);
+            for (const auto& base : BasesTools::GetAllBasePositions()) {
+                bool taken = GroundCovered(base, 64);
+                for (auto depot : depots) taken = taken || depot->getDistance(base) <= 320;
+                for (const auto& depot : enemyDepots) taken = taken || depot.second.getApproxDistance(base) <= 320;
+                if (!taken) controlSpots.push_back(base);
+            }
         }
-        if (spots.empty()) return rally;
-        return spots[unit->getID() % spots.size()];
+        if (controlSpots.empty()) return rally;
+        return controlSpots[unit->getID() % controlSpots.size()];
     }
 
     // Overlords spread one per base rather than stacking over the main, so a single AoE hit or
@@ -1341,10 +1630,13 @@ bool Micro::DodgeFriendlySpell(BWAPI::Unit unit) {
 
 void Micro::ResetCombatState() {
     lurkerLastContact.clear();
+    droneDefenders.clear();
     harassSquad.clear(); harassRegen.clear(); enemyDepots.clear(); harassAvoid.clear();
     harassRetreatUntil = 0;
     harassTarget = BWAPI::Positions::None;
     friendlySpells.clear(); groundCover.clear(); airCover.clear();
+    knownDefenses.clear(); assaultUntil.clear(); assaultCheck.clear();
+    controlSpots.clear(); controlFrame = -1;
     siegeEscort = groundObjective = BWAPI::Positions::None;
     queenPrey.clear(); preyAvoid.clear();
 }
@@ -1441,6 +1733,8 @@ void Micro::ScourgeStrikeLoop(BWAPI::Unit scourge, BWAPI::Position escort) {
 
 void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave, bool needsDetection) {
     const auto threats = GetBaseThreats();
+    // Drones help hold a base the army cannot; they are left alone by the rest of this loop.
+    const auto droneFighters = DefendWithDrones(threats);
     auto rally = BWAPI::Position(BasesTools::GetMainBasePosition());
     const auto enemyBase = BasesTools::GetEnemyBasePosition();
     BWAPI::Unitset mutalisks, guardians, devourers, queens, combat, defaults;
@@ -1466,10 +1760,22 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
     const auto center = UnitCenter(combat, rally);
     // Ground units regroup on their densest cluster, never on the mean of the front line and fresh reinforcements.
     const auto groundBody = CombatPolicy::MainBody(groundPositions, 384, rally);
+    // Static defense first: which colonies the army stays out of shapes where it goes.
+    const bool guardianSiege = CombatPolicy::GuardianSiegeActive(static_cast<int>(guardians.size()));
+    UpdateStaticCover(guardianSiege, threats);
+    // The nearest known enemy base, preferring one not sitting under static defense we are not assaulting.
+    // A covered objective becomes the edge of that cover, where the army gathers until it can go in.
     groundObjective = BWAPI::Positions::None;
-    for (const auto& depot : enemyDepots)
-        if (!groundObjective.isValid() || groundBody.getApproxDistance(depot.second) < groundBody.getApproxDistance(groundObjective))
+    bool objectiveCovered = true;
+    for (const auto& depot : enemyDepots) {
+        const bool covered = GroundCovered(depot.second, 0);
+        if (!groundObjective.isValid() || (objectiveCovered && !covered) ||
+            (covered == objectiveCovered && groundBody.getApproxDistance(depot.second) < groundBody.getApproxDistance(groundObjective))) {
             groundObjective = depot.second;
+            objectiveCovered = covered;
+        }
+    }
+    groundObjective = SafeObjective(groundBody, groundObjective.isValid() ? groundObjective : enemyBase);
     // Without an air group, free Queens and Devourers follow the main army instead of idling at home.
     const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, center);
     // Devourers fly with the Mutalisks (the raid squad when it holds every Mutalisk).
@@ -1491,27 +1797,32 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
         }
         for (auto hydra : group) { hydraCenters[hydra->getID()] = groupCenter; hydraQueens[hydra->getID()] = queen; }
     }
-    for (auto queen : freeQueens) queenEscorts[queen->getID()] = airCenter;
+    // Queens without a Hydra group support the air group, or else march with the ground army's main body
+    // (a Ling/Ultralisk army), never with the average of everything including units still at home.
+    const bool airGroup = !guardians.empty() || !mutalisks.empty();
+    for (auto queen : freeQueens) queenEscorts[queen->getID()] = airGroup ? airCenter : groundBody;
 
     // Guardians outrange all static defense: the rest of the army leaves it to them and advances behind them.
     const bool aggressive = GetMode() == MicroMode::Aggressive;
-    const bool guardianSiege = CombatPolicy::GuardianSiegeActive(static_cast<int>(guardians.size()));
     const bool contain = !aggressive && CombatPolicy::GuardianContain(static_cast<int>(guardians.size()), !threats.empty());
     const auto guardianCenter = UnitCenter(guardians, rally);
     const auto siegeTarget = guardians.empty() ? BWAPI::Positions::None : ChooseGuardianSiege(guardianCenter, aggressive);
-    UpdateStaticCover(guardianSiege, threats);
     siegeEscort = guardianSiege && aggressive ? guardianCenter : BWAPI::Positions::None;
     if (BWAPI::Broodwar->getFrameCount() % 120 == 0)
         MatchLog::Event("queen_support", "hydra_groups=" + std::to_string(groups.size()) + " supported=" + std::to_string(supported) +
             " queens=" + std::to_string(queens.size()));
 
+    BWAPI::Unitset zerglings;
     for (auto unit : myUnits) {
         if (!unit->exists() || !unit->isCompleted() || unit->isLoaded() || unit->isMorphing()) continue;
+        if (droneFighters.contains(unit)) continue;
         const auto type = unit->getType();
         const bool army = !type.isWorker() && !type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Larva &&
             type != BWAPI::UnitTypes::Zerg_Overlord && type != BWAPI::UnitTypes::Zerg_Egg;
         if (army && DodgeFriendlySpell(unit)) continue;
-        if (army && type != BWAPI::UnitTypes::Zerg_Guardian && KeepOutOfStaticDefense(unit, center)) continue;
+        // Guardians outrange static defense and Infested Terrans are spent on it; everything else stays out.
+        if (army && type != BWAPI::UnitTypes::Zerg_Guardian && type != BWAPI::UnitTypes::Zerg_Infested_Terran &&
+            KeepOutOfStaticDefense(unit, center)) continue;
         if (pressureWave.contains(unit) && threats.empty() &&
             (type == BWAPI::UnitTypes::Zerg_Zergling || type == BWAPI::UnitTypes::Zerg_Hydralisk || type == BWAPI::UnitTypes::Zerg_Mutalisk)) {
             BWAPI::Unit target = nullptr;
@@ -1541,8 +1852,12 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
                 if (unit->getDistance(position) < distance) { escort = position; distance = unit->getDistance(position); }
             }
             LurkerSupportLoop(unit, threats, rally, escort);
-        } else if (type == BWAPI::UnitTypes::Zerg_Zergling || type == BWAPI::UnitTypes::Zerg_Ultralisk) {
+        } else if (type == BWAPI::UnitTypes::Zerg_Zergling) {
+            zerglings.insert(unit);
+        } else if (type == BWAPI::UnitTypes::Zerg_Ultralisk) {
             GroundArmyLoop(unit, threats, rally, groundBody);
+        } else if (type == BWAPI::UnitTypes::Zerg_Infested_Terran) {
+            InfestedTerranLoop(unit, threats, groundBody, rally);
         } else if (type == BWAPI::UnitTypes::Zerg_Scourge) {
             ScourgeLoop(unit, threats, !guardians.empty() ? guardianCenter : !mutalisks.empty() ? UnitCenter(mutalisks, rally) : rally);
         } else if (type == BWAPI::UnitTypes::Zerg_Defiler) {
@@ -1562,10 +1877,14 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
                 continue;
             }
             if (BroodlingHunt(unit)) continue;
+            // Trail the escorted group a little, and move right up with it when a spell is ready and the
+            // enemy is close, so spell targets come within cast range.
             auto escort = queenEscorts[unit->getID()];
+            const bool enemyNear = escort.isValid() && !BWAPI::Broodwar->getUnitsInRadius(escort, CombatPolicy::QueenCastSearch, BWAPI::Filter::IsEnemy).empty();
+            const int trail = CombatPolicy::QueenTrail(unit->getEnergy(), enemyNear);
             const auto towardHome = rally - escort;
             const double length = std::sqrt(double(towardHome.x) * towardHome.x + double(towardHome.y) * towardHome.y);
-            if (length > 96) escort += BWAPI::Position(int(towardHome.x * 96 / length), int(towardHome.y * 96 / length));
+            if (trail > 0 && length > trail) escort += BWAPI::Position(int(towardHome.x * trail / length), int(towardHome.y * trail / length));
             if (escort.isValid() && unit->getDistance(escort) > 64) SmartMove(unit, escort);
         } else if (type == BWAPI::UnitTypes::Zerg_Overlord) {
             BWAPI::Unit danger = nullptr;
@@ -1623,6 +1942,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
             else MutaliskHarassLoop(unit, BWAPI::Broodwar->getAllUnits());
         } else defaults.insert(unit);
     }
+    ZerglingSquadLoop(zerglings, threats, rally, groundBody);
     BasicAttackAndScoutLoop(defaults);
 }
 
@@ -1826,13 +2146,42 @@ bool Micro::QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies) {
     if (!queen || !queen->isCompleted() || queen->isMorphing()) return false;
     const auto command = queen->getLastCommand();
     const int age = BWAPI::Broodwar->getFrameCount() - queen->getLastCommandFrame();
+    // BWAPI records an Infestation order as a right-click on the Command Center.
+    const auto infesting = [](BWAPI::UnitCommand order) {
+        return order.getType() == BWAPI::UnitCommandTypes::Right_Click_Unit && order.getTarget() &&
+            order.getTarget()->getType() == BWAPI::UnitTypes::Terran_Command_Center;
+    };
     if (age <= 0 || !queen->isInterruptible() || queen->getSpellCooldown() > 0 ||
-        ((command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Unit || command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Position) &&
-         age <= BWAPI::Broodwar->getLatencyFrames() + 24)) return true;
+        ((command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Unit || command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Position ||
+          infesting(command)) && age <= BWAPI::Broodwar->getLatencyFrames() + 24)) return true;
+    // A healthy Queen walks up to its 9-tile cast range for targets a little further out, instead of
+    // waiting at the back until the fight comes to it.
+    const int search = queen->getHitPoints() * 2 >= queen->getType().maxHitPoints() ? CombatPolicy::QueenCastSearch : 9 * 32;
     BWAPI::Unitset nearby;
     for (auto enemy : enemies) {
-        if (enemy->exists() && enemy->isVisible() && BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer()) && queen->getDistance(enemy) <= 9 * 32)
+        if (enemy->exists() && enemy->isVisible() && BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer()) && queen->getDistance(enemy) <= search)
             nearby.insert(enemy);
+    }
+    // A Command Center below half health is ours for free (no energy, no research): infest it,
+    // unless anti-air guards it.
+    const auto infest = BWAPI::TechTypes::Infestation;
+    for (auto center : nearby) {
+        if (center->getType() != BWAPI::UnitTypes::Terran_Command_Center || !center->isCompleted() ||
+            center->getHitPoints() * 2 >= center->getType().maxHitPoints() || !queen->canUseTech(infest, center)) continue;
+        bool taken = false;
+        for (auto ally : BWAPI::Broodwar->self()->getUnits())
+            taken = taken || (ally != queen && ally->getType() == BWAPI::UnitTypes::Zerg_Queen &&
+                infesting(ally->getLastCommand()) && ally->getLastCommand().getTarget() == center &&
+                BWAPI::Broodwar->getFrameCount() - ally->getLastCommandFrame() <= 24 * 10);
+        if (taken) continue;
+        int antiAir = 0;
+        for (auto guard : nearby)
+            if (guard->getType().airWeapon() != BWAPI::WeaponTypes::None && guard->getDistance(center) <= 192) ++antiAir;
+        if (antiAir > 1) continue;
+        if (queen->useTech(infest, center)) {
+            MatchLog::Event("queen_spell", "Infestation queen=" + std::to_string(queen->getID()) + " target=" + std::to_string(center->getID()));
+            return true;
+        }
     }
     const auto broodlings = BWAPI::TechTypes::Spawn_Broodlings;
     if (queen->getEnergy() >= broodlings.energyCost() && BWAPI::Broodwar->self()->hasResearched(broodlings)) {
@@ -1858,7 +2207,7 @@ bool Micro::QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies) {
         std::vector<BWAPI::Unit> allies;
         for (auto ally : BWAPI::Broodwar->self()->getUnits()) {
             if (ally->exists() && !ally->getType().isBuilding() && ally->getType().canAttack() &&
-                queen->getDistance(ally) <= 9 * 32 + CombatPolicy::EnsnareRadius) allies.push_back(ally);
+                queen->getDistance(ally) <= search + CombatPolicy::EnsnareRadius) allies.push_back(ally);
         }
         BWAPI::Unit target = nullptr;
         int bestScore = 0, bestCluster = 0;
@@ -2088,4 +2437,43 @@ void Micro::DefilerLoop(BWAPI::Unit defiler, BWAPI::Position follow, BWAPI::Posi
     const double length = std::sqrt(double(towardHome.x) * towardHome.x + double(towardHome.y) * towardHome.y);
     if (length > 128) spot += BWAPI::Position(int(towardHome.x * 128 / length), int(towardHome.y * 128 / length));
     if (spot.isValid() && defiler->getDistance(spot) > 64) SmartMove(defiler, spot);
+}
+
+void Micro::InfestedTerranLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position follow, BWAPI::Position rally) {
+    if (!unit || unit->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return;
+    const auto self = BWAPI::Broodwar->self();
+    // The blast is spent where it does the most: packed enemy ground units, a sieged tank, static defense.
+    BWAPI::Unit best = nullptr;
+    int bestScore = 0;
+    for (auto enemy : unit->getUnitsInRadius(10 * 32, BWAPI::Filter::IsEnemy)) {
+        if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || enemy->isFlying()) continue;
+        const auto type = enemy->getType();
+        const bool staticDefense = type.isBuilding() && StaticReach(enemy, false) >= 0;
+        if (type.isBuilding() && !staticDefense) continue;
+        const bool highValue = type == BWAPI::UnitTypes::Terran_Siege_Tank_Siege_Mode || type == BWAPI::UnitTypes::Terran_Siege_Tank_Tank_Mode ||
+            type == BWAPI::UnitTypes::Protoss_High_Templar || type == BWAPI::UnitTypes::Protoss_Reaver ||
+            type == BWAPI::UnitTypes::Protoss_Archon || type == BWAPI::UnitTypes::Zerg_Lurker || type == BWAPI::UnitTypes::Zerg_Defiler;
+        int enemySupply = 0, ourSupply = 0;
+        for (auto other : BWAPI::Broodwar->getUnitsInRadius(enemy->getPosition(), CombatPolicy::InfestedTerranBlast)) {
+            if (!other->exists() || other->isFlying() || other->getType().isBuilding() || other == unit) continue;
+            const int supply = std::max(1, other->getType().supplyRequired() / 2);
+            if (other->getPlayer() == self) ourSupply += supply;
+            else if (self->isEnemy(other->getPlayer())) enemySupply += supply;
+        }
+        const int score = CombatPolicy::InfestedTerranScore(enemySupply, staticDefense, highValue, ourSupply);
+        if (score > bestScore) { bestScore = score; best = enemy; }
+    }
+    if (best) {
+        BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Infested: detonate");
+        SmartAttackUnit(unit, best);
+        return;
+    }
+    // Head for a raid on our bases; the blast goes off once the attackers bunch up in reach.
+    BWAPI::Unit threat = nullptr;
+    for (auto enemy : threats)
+        if (!enemy->isFlying() && enemy->isDetected() && (!threat || unit->getDistance(enemy) < unit->getDistance(threat))) threat = enemy;
+    if (threat) { SmartMove(unit, threat->getPosition()); return; }
+    // Otherwise travel with the army, never ahead of it.
+    const auto spot = GetMode() == MicroMode::Aggressive && follow.isValid() ? follow : rally;
+    if (spot.isValid() && unit->getDistance(spot) > 128) SmartMove(unit, spot);
 }

@@ -74,6 +74,11 @@ namespace {
         { "SwitchMargin",          0.05, 1.0, 0.30, false },
         { "SwitchCooldownSeconds", 45,  300,  120,  true  },
         { "CounterWeight",         0.2, 2.0,  1.0,  false },
+        // Macro openers: >= 0.5 takes the natural before the pool (rush compositions always pool first).
+        { "HatchFirst",            0.0, 1.0,  0.75, false },
+        { "OpenerHatchDrones",     10,  13,   12,   true  },
+        // Hive-bound compositions take their third base at this drone count, without first saturating two bases.
+        { "EarlyThirdDrones",      18,  40,   24,   true  },
     };
 
     double Clamp01(double value) { return std::clamp(value, 0.0, 1.0); }

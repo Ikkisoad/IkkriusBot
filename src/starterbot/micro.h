@@ -14,6 +14,9 @@ namespace Micro
 
     BWAPI::Unitset GetBaseThreats();
     bool DefendBases(BWAPI::Unit unit, const BWAPI::Unitset& threats);
+    // When the army at a base cannot hold it, nearby Drones fight too; released Drones go back to mining.
+    // Returns the Drones fighting this frame.
+    BWAPI::Unitset DefendWithDrones(const BWAPI::Unitset& threats);
     void SetMode(MicroMode newMode);
     MicroMode GetMode();
 
@@ -45,6 +48,11 @@ namespace Micro
     void LurkerSupportLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);
     void DevourerEscortLoop(BWAPI::Unit unit, BWAPI::Position escort);
     bool SpellReserved(BWAPI::TechType tech, BWAPI::Unit target, BWAPI::Position position);
+
+    // Zerglings fight as squads: one scan and decision per group of nearby lings, not per ling.
+    void ZerglingSquadLoop(const BWAPI::Unitset& zerglings, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position body);
+    // Infested Terrans explode on packed ground units, sieged tanks and static defense.
+    void InfestedTerranLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position follow, BWAPI::Position rally);
 
     // HiveTech Micro
     void GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);
