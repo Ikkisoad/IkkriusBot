@@ -921,6 +921,8 @@ namespace {
     std::vector<std::pair<BWAPI::Unit, int>> groundCover, airCover;
     // Where the ground army advances while Guardians siege; None means the enemy main.
     BWAPI::Position siegeEscort = BWAPI::Positions::None;
+    // The known enemy base closest to the ground army's main body; None means the enemy main.
+    BWAPI::Position groundObjective = BWAPI::Positions::None;
 }
 
 // True when `enemy` sits inside static defense that could hit `unit` while Guardians are available to siege it.
@@ -989,13 +991,21 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
     // No orders to attack and nothing threatening a base: spread out for map control instead of
     // clumping the whole army at the rally point. Attack-move still lets it fight anything it finds.
     if (GetMode() != MicroMode::Aggressive) {
-        SmartAttackMove(unit, threats.empty() ? ControlPoint(unit, rally) : rally);
+        const auto point = threats.empty() ? ControlPoint(unit, rally) : rally;
+        if (!UseNydus(unit, point)) SmartAttackMove(unit, point);
         return;
     }
-    if (unit->getDistance(center) > 320) { SmartAttackMove(unit, center); return; }
-    const auto enemyBase = siegeEscort.isValid() ? siegeEscort : BasesTools::GetEnemyBasePosition();
-    if (enemyBase.isValid()) SmartAttackMove(unit, enemyBase);
-    else ScoutAndWander(unit);
+    const auto destination = siegeEscort.isValid() ? siegeEscort :
+        groundObjective.isValid() ? groundObjective : BasesTools::GetEnemyBasePosition();
+    if (!destination.isValid()) { ScoutAndWander(unit); return; }
+    // Only units running ahead of the main body wait for it; the rest keep marching on the target.
+    if (center.isValid() && CombatPolicy::WaitForMainBody(unit->getDistance(destination),
+        center.getApproxDistance(destination), unit->getDistance(center))) {
+        SmartAttackMove(unit, center);
+        return;
+    }
+    if (UseNydus(unit, destination)) return;
+    SmartAttackMove(unit, destination);
 }
 
 namespace {
@@ -1091,6 +1101,9 @@ namespace {
     // Our own units step out of an area a Queen is about to Ensnare.
     struct SpellArea { BWAPI::Position center; int radius = 0, until = 0; };
     std::vector<SpellArea> friendlySpells;
+
+    // Broodling hunts: queen ID -> prey ID, and prey abandoned after the Queen met anti-air, until frame.
+    std::map<int, int> queenPrey, preyAvoid;
 
     // Mutalisk raid squad, kept stable across frames.
     std::set<int> harassSquad, harassRegen;
@@ -1332,7 +1345,8 @@ void Micro::ResetCombatState() {
     harassRetreatUntil = 0;
     harassTarget = BWAPI::Positions::None;
     friendlySpells.clear(); groundCover.clear(); airCover.clear();
-    siegeEscort = BWAPI::Positions::None;
+    siegeEscort = groundObjective = BWAPI::Positions::None;
+    queenPrey.clear(); preyAvoid.clear();
 }
 
 std::vector<BWAPI::Unitset> Micro::GetHydraGroups(const BWAPI::Unitset& units) {
@@ -1430,6 +1444,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
     auto rally = BWAPI::Position(BasesTools::GetMainBasePosition());
     const auto enemyBase = BasesTools::GetEnemyBasePosition();
     BWAPI::Unitset mutalisks, guardians, devourers, queens, combat, defaults;
+    std::vector<BWAPI::Position> groundPositions;
     BWAPI::Unit scout = nullptr;
     for (auto unit : myUnits) {
         if (!unit->exists() || !unit->isCompleted() || unit->isLoaded() || unit->isMorphing()) continue;
@@ -1440,12 +1455,21 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
         else if (type == BWAPI::UnitTypes::Zerg_Mutalisk) mutalisks.insert(unit);
         else if (type == BWAPI::UnitTypes::Zerg_Guardian) guardians.insert(unit);
         else if (type == BWAPI::UnitTypes::Zerg_Devourer) devourers.insert(unit);
-        if (!type.isWorker() && !type.isBuilding() && type.canAttack()) combat.insert(unit);
+        if (!type.isWorker() && !type.isBuilding() && type.canAttack()) {
+            combat.insert(unit);
+            if (!unit->isFlying()) groundPositions.push_back(unit->getPosition());
+        }
     }
     // Raiders leave the main flock, so escort and regroup centers ignore them.
     const auto raid = UpdateRaidSquad(mutalisks, pressureWave, rally);
     for (auto raider : raid.raiders) mutalisks.erase(raider);
     const auto center = UnitCenter(combat, rally);
+    // Ground units regroup on their densest cluster, never on the mean of the front line and fresh reinforcements.
+    const auto groundBody = CombatPolicy::MainBody(groundPositions, 384, rally);
+    groundObjective = BWAPI::Positions::None;
+    for (const auto& depot : enemyDepots)
+        if (!groundObjective.isValid() || groundBody.getApproxDistance(depot.second) < groundBody.getApproxDistance(groundObjective))
+            groundObjective = depot.second;
     // Without an air group, free Queens and Devourers follow the main army instead of idling at home.
     const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, center);
     // Devourers fly with the Mutalisks (the raid squad when it holds every Mutalisk).
@@ -1510,7 +1534,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
                 SmartAttackMove(unit, hydraCenters[unit->getID()]);
             else GroundArmyLoop(unit, threats, rally, hydraCenters[unit->getID()]);
         } else if (type == BWAPI::UnitTypes::Zerg_Lurker) {
-            auto escort = center;
+            auto escort = groundBody;
             int distance = std::numeric_limits<int>::max();
             for (const auto& group : groups) {
                 const auto position = UnitCenter(group, rally);
@@ -1518,7 +1542,11 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
             }
             LurkerSupportLoop(unit, threats, rally, escort);
         } else if (type == BWAPI::UnitTypes::Zerg_Zergling || type == BWAPI::UnitTypes::Zerg_Ultralisk) {
-            GroundArmyLoop(unit, threats, rally, center);
+            GroundArmyLoop(unit, threats, rally, groundBody);
+        } else if (type == BWAPI::UnitTypes::Zerg_Scourge) {
+            ScourgeLoop(unit, threats, !guardians.empty() ? guardianCenter : !mutalisks.empty() ? UnitCenter(mutalisks, rally) : rally);
+        } else if (type == BWAPI::UnitTypes::Zerg_Defiler) {
+            DefilerLoop(unit, groundBody, rally);
         } else if (type == BWAPI::UnitTypes::Zerg_Queen) {
             if (QueenCastLoop(unit, BWAPI::Broodwar->getAllUnits())) continue;
             BWAPI::Unit danger = nullptr;
@@ -1526,7 +1554,14 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
                 if (enemy->getType().airWeapon() != BWAPI::WeaponTypes::None &&
                     unit->getDistance(enemy) < enemy->getType().airWeapon().maxRange() + 32) { danger = enemy; break; }
             }
-            if (danger) { Flee(unit, danger); continue; }
+            if (danger) {
+                // A hunt that runs into anti-air is dropped for a while.
+                const auto prey = queenPrey.find(unit->getID());
+                if (prey != queenPrey.end()) { preyAvoid[prey->second] = BWAPI::Broodwar->getFrameCount() + 24 * 45; queenPrey.erase(prey); }
+                Flee(unit, danger);
+                continue;
+            }
+            if (BroodlingHunt(unit)) continue;
             auto escort = queenEscorts[unit->getID()];
             const auto towardHome = rally - escort;
             const double length = std::sqrt(double(towardHome.x) * towardHome.x + double(towardHome.y) * towardHome.y);
@@ -1776,7 +1811,7 @@ void Micro::GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies, BW
 
 bool Micro::SpellReserved(BWAPI::TechType tech, BWAPI::Unit target, BWAPI::Position position) {
     for (auto ally : BWAPI::Broodwar->self()->getUnits()) {
-        if (ally->getType() != BWAPI::UnitTypes::Zerg_Queen) continue;
+        if (ally->getType() != BWAPI::UnitTypes::Zerg_Queen && ally->getType() != BWAPI::UnitTypes::Zerg_Defiler) continue;
         const auto command = ally->getLastCommand();
         if (BWAPI::Broodwar->getFrameCount() - ally->getLastCommandFrame() > BWAPI::Broodwar->getLatencyFrames() + 24) continue;
         if (command.getTechType() != tech) continue;
@@ -1859,4 +1894,198 @@ bool Micro::QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies) {
         }
     }
     return false;
+}
+
+bool Micro::BroodlingHunt(BWAPI::Unit queen) {
+    const auto self = BWAPI::Broodwar->self();
+    const auto broodlings = BWAPI::TechTypes::Spawn_Broodlings;
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    if (!queen || !self->hasResearched(broodlings) || queen->getEnergy() < broodlings.energyCost() ||
+        queen->getHitPoints() * 2 < queen->getType().maxHitPoints()) {
+        if (queen) queenPrey.erase(queen->getID());
+        return false;
+    }
+    for (auto it = preyAvoid.begin(); it != preyAvoid.end();) it = it->second <= frame ? preyAvoid.erase(it) : std::next(it);
+    const auto current = queenPrey.find(queen->getID());
+    BWAPI::Unit best = nullptr;
+    double bestScore = 0;
+    for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
+        if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !self->isEnemy(enemy->getPlayer()) ||
+            enemy->isFlying() || enemy->getType().isBuilding() || preyAvoid.count(enemy->getID())) continue;
+        const auto type = enemy->getType();
+        int value = type.mineralPrice() + type.gasPrice() * 2;
+        if (type == BWAPI::UnitTypes::Terran_Siege_Tank_Siege_Mode || type == BWAPI::UnitTypes::Terran_Siege_Tank_Tank_Mode ||
+            type == BWAPI::UnitTypes::Protoss_High_Templar || type == BWAPI::UnitTypes::Zerg_Defiler ||
+            type == BWAPI::UnitTypes::Zerg_Lurker) value += 500;
+        if (value < 200 || !queen->canUseTech(broodlings, enemy) || SpellReserved(broodlings, enemy, enemy->getPosition())) continue;
+        // Another Queen is already fishing for this one.
+        bool taken = false;
+        for (const auto& [hunter, prey] : queenPrey) taken = taken || (hunter != queen->getID() && prey == enemy->getID());
+        if (taken) continue;
+        double antiAir = 0;
+        for (auto guard : BWAPI::Broodwar->getUnitsInRadius(enemy->getPosition(), 256, BWAPI::Filter::IsEnemy)) {
+            if (!guard->isVisible() || AirThreatRange(guard) < 0) continue;
+            antiAir += guard->getType().isBuilding() ? 2.0 : std::max(1, guard->getType().supplyRequired()) / 2.0;
+        }
+        double score = CombatPolicy::BroodlingHuntScore(value, queen->getDistance(enemy), antiAir);
+        if (score > 0 && current != queenPrey.end() && current->second == enemy->getID()) score += 100; // Stay on the hunt.
+        if (score > bestScore) { bestScore = score; best = enemy; }
+    }
+    if (!best) { queenPrey.erase(queen->getID()); return false; }
+    if (current == queenPrey.end() || current->second != best->getID())
+        MatchLog::Event("broodling_hunt", "queen=" + std::to_string(queen->getID()) + " prey=" + best->getType().getName());
+    queenPrey[queen->getID()] = best->getID();
+    // In cast range QueenCastLoop takes the shot on the next frame.
+    BWAPI::Broodwar->drawLineMap(queen->getPosition(), best->getPosition(), BWAPI::Colors::Purple);
+    SmartMove(queen, best->getPosition());
+    return true;
+}
+
+namespace {
+    // Nydus Canal ends, refreshed once per frame.
+    std::vector<BWAPI::Unit> nydusCanals;
+    int nydusFrame = -1;
+}
+
+bool Micro::UseNydus(BWAPI::Unit unit, BWAPI::Position destination) {
+    if (!unit || unit->isFlying() || unit->isBurrowed() || !destination.isValid()) return false;
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    if (nydusFrame != frame) {
+        nydusFrame = frame;
+        nydusCanals.clear();
+        for (auto canal : BWAPI::Broodwar->self()->getUnits())
+            if (canal->getType() == BWAPI::UnitTypes::Zerg_Nydus_Canal && canal->isCompleted() &&
+                canal->getNydusExit() && canal->getNydusExit()->isCompleted()) nydusCanals.push_back(canal);
+    }
+    if (nydusCanals.empty()) return false;
+    // Already walking into a canal.
+    const auto command = unit->getLastCommand();
+    if (command.getType() == BWAPI::UnitCommandTypes::Right_Click_Unit && command.getTarget() &&
+        command.getTarget()->getType() == BWAPI::UnitTypes::Zerg_Nydus_Canal && !unit->isIdle() &&
+        frame - unit->getLastCommandFrame() < 24 * 6) return true;
+    if (unit->getLastCommandFrame() >= frame) return false;
+    for (auto canal : nydusCanals) {
+        if (!CombatPolicy::NydusShortcut(unit->getDistance(canal), canal->getNydusExit()->getDistance(destination),
+            unit->getDistance(destination))) continue;
+        return unit->rightClick(canal);
+    }
+    return false;
+}
+
+void Micro::ScourgeLoop(BWAPI::Unit scourge, const BWAPI::Unitset& threats, BWAPI::Position guard) {
+    if (!scourge || scourge->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return;
+    BWAPI::Unitset candidates = scourge->getUnitsInRadius(12 * 32, BWAPI::Filter::IsEnemy);
+    for (auto threat : threats) candidates.insert(threat);
+    BWAPI::Unit best = nullptr;
+    double bestScore = std::numeric_limits<double>::max();
+    for (auto enemy : candidates) {
+        const auto type = enemy->getType();
+        if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !enemy->isFlying() || type.isBuilding() ||
+            type == BWAPI::UnitTypes::Protoss_Interceptor || type == BWAPI::UnitTypes::Protoss_Scarab || !scourge->canAttack(enemy)) continue;
+        // Enough Scourge already flying at it to finish it: pick another target.
+        int assigned = 0;
+        for (auto ally : enemy->getUnitsInRadius(12 * 32, BWAPI::Filter::IsOwned))
+            if (ally != scourge && ally->getType() == BWAPI::UnitTypes::Zerg_Scourge && ally->getOrderTarget() == enemy) ++assigned;
+        if (assigned >= CombatPolicy::ScourgeNeeded(enemy->getHitPoints() + enemy->getShields())) continue;
+        const int value = type.mineralPrice() + type.gasPrice() * 2;
+        const double score = scourge->getDistance(enemy) - value * 0.5;
+        if (score < bestScore) { bestScore = score; best = enemy; }
+    }
+    if (best) { SmartAttackUnit(scourge, best); return; }
+    if (guard.isValid() && scourge->getDistance(guard) > 96) SmartMove(scourge, guard);
+}
+
+void Micro::DefilerLoop(BWAPI::Unit defiler, BWAPI::Position follow, BWAPI::Position home) {
+    if (!defiler || !defiler->isCompleted() || defiler->isBurrowed()) return;
+    const auto self = BWAPI::Broodwar->self();
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    const auto command = defiler->getLastCommand();
+    const int age = frame - defiler->getLastCommandFrame();
+    if (age <= 0 || !defiler->isInterruptible() ||
+        ((command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Unit || command.getType() == BWAPI::UnitCommandTypes::Use_Tech_Position) &&
+         age <= BWAPI::Broodwar->getLatencyFrames() + 24)) return;
+
+    BWAPI::Unitset enemies, allies;
+    for (auto unit : defiler->getUnitsInRadius(12 * 32)) {
+        if (!unit->exists() || !unit->isCompleted() || unit->getType().isBuilding()) continue;
+        if (unit->getPlayer() == self) {
+            if (!unit->isFlying() && !unit->getType().isWorker() && unit->getType().canAttack()) allies.insert(unit);
+        } else if (self->isEnemy(unit->getPlayer()) && unit->isVisible()) enemies.insert(unit);
+    }
+
+    // Dark Swarm: our ground units under fire from ranged enemies stop taking ranged damage.
+    const auto swarm = BWAPI::TechTypes::Dark_Swarm;
+    if (defiler->getEnergy() >= swarm.energyCost() && self->hasResearched(swarm)) {
+        BWAPI::Position bestSpot = BWAPI::Positions::None;
+        int bestAllies = 0;
+        for (auto ally : allies) {
+            int shooters = 0, grouped = 0;
+            for (auto enemy : enemies) {
+                const auto weapon = enemy->getType().groundWeapon();
+                const bool ranged = enemy->getType() == BWAPI::UnitTypes::Terran_Bunker ||
+                    (weapon != BWAPI::WeaponTypes::None && weapon.maxRange() >= 64);
+                if (ranged && enemy->getDistance(ally) <= std::max(weapon.maxRange(), 160) + 32) ++shooters;
+            }
+            if (shooters < 2) continue;
+            for (auto other : allies) if (other->getDistance(ally) <= 96) ++grouped;
+            if (grouped < 3 || grouped <= bestAllies || SpellReserved(swarm, nullptr, ally->getPosition())) continue;
+            bool covered = false;
+            for (auto spell : BWAPI::Broodwar->getUnitsInRadius(ally->getPosition(), 128))
+                covered = covered || spell->getType() == BWAPI::UnitTypes::Spell_Dark_Swarm;
+            if (covered) continue;
+            bestAllies = grouped;
+            bestSpot = ally->getPosition();
+        }
+        if (bestSpot.isValid() && defiler->useTech(swarm, bestSpot)) {
+            MatchLog::Event("defiler_spell", "Dark_Swarm allies=" + std::to_string(bestAllies));
+            return;
+        }
+    }
+
+    // Plague on packed enemies, weighed like Ensnare so our own army is not caught in it.
+    const auto plague = BWAPI::TechTypes::Plague;
+    if (defiler->getEnergy() >= plague.energyCost() && self->hasResearched(plague)) {
+        BWAPI::Unit target = nullptr;
+        int bestScore = 0;
+        for (auto candidate : enemies) {
+            if (candidate->isPlagued() || SpellReserved(plague, nullptr, candidate->getPosition())) continue;
+            int caught = 0, ours = 0;
+            for (auto enemy : enemies) if (!enemy->isPlagued() && enemy->getDistance(candidate) <= 64) ++caught;
+            for (auto ally : allies) if (ally->getDistance(candidate) <= 64) ++ours;
+            const int score = CombatPolicy::PlagueScore(caught, ours);
+            if (score > bestScore) { bestScore = score; target = candidate; }
+        }
+        if (target && defiler->useTech(plague, target->getPosition())) {
+            MatchLog::Event("defiler_spell", "Plague targets=" + std::to_string(bestScore));
+            return;
+        }
+    }
+
+    // Consume a Zergling away from the fighting to refill energy.
+    const auto consume = BWAPI::TechTypes::Consume;
+    if (defiler->getEnergy() < plague.energyCost() && self->hasResearched(consume)) {
+        BWAPI::Unit food = nullptr;
+        for (auto ally : defiler->getUnitsInRadius(6 * 32, BWAPI::Filter::IsOwned)) {
+            if (ally->getType() != BWAPI::UnitTypes::Zerg_Zergling || !ally->isCompleted() ||
+                !ally->getUnitsInRadius(192, BWAPI::Filter::IsEnemy).empty()) continue;
+            if (!food || defiler->getDistance(ally) < defiler->getDistance(food)) food = ally;
+        }
+        if (food && defiler->useTech(consume, food)) {
+            MatchLog::Event("defiler_spell", "Consume");
+            return;
+        }
+    }
+
+    // Stay just behind the army, out of reach of enemy ground fire.
+    BWAPI::Unit danger = nullptr;
+    for (auto enemy : enemies) {
+        const auto weapon = enemy->getType().groundWeapon();
+        if (weapon != BWAPI::WeaponTypes::None && defiler->getDistance(enemy) <= weapon.maxRange() + 64) { danger = enemy; break; }
+    }
+    if (danger) { FallBack(defiler, danger, follow); return; }
+    auto spot = follow.isValid() ? follow : home;
+    const auto towardHome = home - spot;
+    const double length = std::sqrt(double(towardHome.x) * towardHome.x + double(towardHome.y) * towardHome.y);
+    if (length > 128) spot += BWAPI::Position(int(towardHome.x * 128 / length), int(towardHome.y * 128 / length));
+    if (spot.isValid() && defiler->getDistance(spot) > 64) SmartMove(defiler, spot);
 }

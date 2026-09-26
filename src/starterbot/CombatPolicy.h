@@ -1,5 +1,7 @@
 #pragma once
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 // Pure composition decisions shared by strategy, micro and focused regressions.
 namespace CombatPolicy {
@@ -135,5 +137,100 @@ namespace CombatPolicy {
     // While Guardians deny the opponent's expansions, keep taking more of our own.
     inline bool ContainExpansion(int guardians, int miningSites, int drones) {
         return guardians >= 4 && miningSites >= 2 && miningSites < 7 && drones >= miningSites * 10;
+    }
+    // Attack as soon as the army clearly outweighs everything scouted instead of waiting for the full
+    // attack size, which let the army grow far past the opponent's before it ever moved out.
+    constexpr double AdvantageRatio = 1.6;
+    constexpr int AdvantageMinArmy = 12; // Normal supply: a handful of units is not an army.
+    inline bool AttackOnAdvantage(int armySupply, int knownEnemySupply, int attackSupply, bool scouted) {
+        const int army = armySupply / 2;
+        if (army < std::max(AdvantageMinArmy, attackSupply / 3)) return false;
+        // Scouted and nothing seen: an army of half the normal size is already enough.
+        if (knownEnemySupply <= 0) return scouted && army >= std::max(AdvantageMinArmy, attackSupply / 2);
+        return armySupply >= knownEnemySupply * AdvantageRatio;
+    }
+    // Every idle minute since the last attack lowers the army size needed to go again, down to half.
+    inline int PatientAttackSupply(int attackSupply, double idleSeconds) {
+        const double factor = std::clamp(1.0 - std::max(0.0, idleSeconds) / 60.0 * 0.1, 0.5, 1.0);
+        return std::max(AdvantageMinArmy, static_cast<int>(attackSupply * factor));
+    }
+
+    // Ground units march on the target; only units running ahead of the main body, out of contact, wait
+    // for it. Units behind the body keep marching, so nothing is pulled backwards onto a midpoint.
+    inline bool WaitForMainBody(int unitToTarget, int bodyToTarget, int unitToBody) {
+        return unitToBody > 320 && unitToTarget + 192 < bodyToTarget;
+    }
+    // Center of the densest group of points (the army's main body), not the mean of every straggler:
+    // the mean of a front line and fresh reinforcements at home lies in the middle of the map.
+    template <class Point>
+    Point MainBody(const std::vector<Point>& points, int radius, Point fallback) {
+        if (points.empty()) return fallback;
+        const long long r2 = 1LL * radius * radius;
+        const auto within = [r2](const Point& a, const Point& b) {
+            const long long dx = a.x - b.x, dy = a.y - b.y;
+            return dx * dx + dy * dy <= r2;
+        };
+        size_t anchor = 0; int best = -1;
+        for (size_t i = 0; i < points.size(); ++i) {
+            int count = 0;
+            for (const auto& other : points) count += within(points[i], other);
+            if (count > best) { best = count; anchor = i; }
+        }
+        long long x = 0, y = 0; int n = 0;
+        for (const auto& other : points)
+            if (within(points[anchor], other)) { x += other.x; y += other.y; ++n; }
+        Point center = fallback;
+        center.x = static_cast<int>(x / n); center.y = static_cast<int>(y / n);
+        return center;
+    }
+
+    // Gas never takes the drones minerals need: at least eight and two thirds of the drones stay on
+    // minerals, and banked gas far beyond minerals pulls miners back off the geysers.
+    inline int GasWorkerBudget(int drones, int extractors, int minerals, int gas) {
+        int budget = std::min(extractors * 3, std::max(0, drones - std::max(8, drones * 2 / 3)));
+        if (gas > 600 && gas > minerals) budget = std::min(budget, extractors);
+        if (gas >= 1000 && gas > minerals * 4) budget = 0;
+        return std::max(0, budget);
+    }
+
+    // Scourge against enemy air our other anti-air cannot handle: one Scourge hit (110 damage) per
+    // 110 hit points of enemy air, scaled down by the Mutalisks/Hydras/Devourers already covering it.
+    inline int ScourgeTarget(int enemyAirHitPoints, int enemyAirSupply, int ourAntiAirSupply) {
+        if (enemyAirSupply <= 0 || enemyAirHitPoints <= 0) return 0;
+        const double uncovered = std::clamp(1.0 - ourAntiAirSupply / (enemyAirSupply * 1.5), 0.0, 1.0);
+        const int scourge = static_cast<int>(std::ceil(enemyAirHitPoints / 110.0 * uncovered));
+        return std::min(24, (scourge + 1) / 2 * 2); // They hatch in pairs.
+    }
+    // Overkill guard: Scourge assigned to one target, enough to kill it and no more.
+    inline int ScourgeNeeded(int hitPoints) { return std::max(1, (hitPoints + 109) / 110); }
+
+    // Defilers join only very late: a long game with a big ground army, where Dark Swarm and Plague decide fights.
+    inline int DefilerTarget(double minutes, int supplyUsed, int groundArmySupply) {
+        const bool late = (minutes >= 20 && supplyUsed >= 300) || minutes >= 28;
+        if (!late || groundArmySupply < 40) return 0;
+        return std::clamp(groundArmySupply / 40 + (minutes >= 28 ? 1 : 0), 1, 4);
+    }
+    // Plague and Dark Swarm follow the Ensnare rule: allies caught count double.
+    inline int PlagueScore(int enemies, int allies) {
+        const int score = enemies - allies * 2;
+        return enemies >= 4 && score >= 4 ? score : 0;
+    }
+
+    // A Queen with Spawn Broodlings energy goes out fishing for one valuable ground unit, as long as the
+    // trip is short and little anti-air guards it. Zero means "not worth the trip".
+    constexpr int BroodlingHuntRange = 32 * 60;
+    inline double BroodlingHuntScore(int value, int distance, double antiAirPower) {
+        if (value < 200 || distance > BroodlingHuntRange || antiAirPower > 3.0) return 0;
+        const double score = value - distance * 0.25 - antiAirPower * 150;
+        return score > 0 ? score : 0;
+    }
+
+    // Ground-heavy compositions link a forward Hatchery to the main with a Nydus Canal.
+    inline bool WantsNydus(double groundShare, bool rushPending, int miningSites) {
+        return groundShare >= 0.5 && !rushPending && miningSites >= 2;
+    }
+    // Take the Nydus when entering at one end and walking from the other saves real distance.
+    inline bool NydusShortcut(int unitToEntrance, int exitToDestination, int unitToDestination) {
+        return unitToEntrance <= 640 && unitToEntrance + exitToDestination + 320 < unitToDestination;
     }
 }

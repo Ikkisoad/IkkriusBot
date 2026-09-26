@@ -314,6 +314,13 @@ Two learners decide when and what to build:
   composition that was used receives the match reward, weighted by how long it was
   active. The opening choice explores with UCB and a 10% random pick. Mid-match choices
   use the learned values plus the hand-written counter table.
+- **Experiments (off-plan production).** Every 30 seconds after minute 4 there is a 6%
+  chance to buy one extra unit or structure that is available and affordable right then,
+  even if it is outside the plan (a Spire, Scourge, a Spore, a macro Hatchery, ...). At
+  the end of the match every item tried receives the match reward and is compared with
+  the average reward of all matches. Items that came before better results are picked more
+  often, and items that came before worse results fade out. Experiments are off when
+  `IKKRIUS_LEARNING=0`. Logs record `experiment` events.
 
 The reward is mostly win or loss, adjusted by kill/loss score and survival time. Learning
 state is saved to `bin/learning/adaptive-<race>.txt`, which is gitignored. Delete that
@@ -328,6 +335,33 @@ In game, type `comp` to show the current plan, `comp <name|1-9>` to lock a compo
 and `comp auto` to hand control back to the learners. The overlay shows the composition,
 the current step, the genome generation and index, and the number of switches. Match logs
 record `genome`, `composition`, and `learning` events.
+
+Army and economy rules in the Adaptive build:
+
+- **Attack timing**: the army moves out as soon as it has 1.6x the enemy army it has scouted
+  (at least 12 supply), without waiting for the evolved attack size. Each idle minute
+  since the last attack also lowers that size by 10%, down to half. Retreats are measured
+  against the army that left, not the planned size.
+- **Ground movement**: ground units group on their densest cluster (the main body), not
+  on the average position of every unit. Only units running ahead of the body wait for
+  it. Units behind it keep marching, and the army heads for the known enemy base nearest
+  to it.
+- **Nydus Canal**: compositions that are at least half ground units go Hive after the
+  natural and connect the main to the Hatchery closest to the enemy. Ground units use the
+  canal when it cuts their walk (`nydus` events).
+- **Defilers**: in very long games (20+ minutes and 150+ supply, or 28+ minutes) that have
+  a real ground army, the build adds a Defiler Mound, Consume, Plague and 1–4 Defilers.
+  Defilers stay behind the army. They cast Dark Swarm over allies under ranged fire and
+  Plague on packed enemies, and they consume idle Zerglings for energy.
+- **Scourge**: with a Spire, Scourge are built against scouted enemy air that our
+  Mutalisks, Hydras and Devourers cannot cover. Guardian builds in particular need this.
+  Scourge avoid Interceptors, and no more are sent at a target than it takes to kill it.
+- **Broodling fishing**: any Queen with Spawn Broodlings energy, idle or escorting, flies
+  to a valuable ground unit (tanks, Templar, Lurkers, ...) that has little anti-air nearby,
+  casts, and returns. A hunt that runs into anti-air is dropped for 45 seconds.
+- **Gas staffing**: one gas budget is split across all Extractors. At least 8 drones, and
+  at least two thirds of all drones, stay on minerals. Gas is cut back when banked gas far
+  exceeds minerals.
 
 ### Surplus economy and pressure waves
 

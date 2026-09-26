@@ -130,6 +130,8 @@ void Adaptive::onStart() {
 
     m_enemyUnits.clear();
     m_attacking = m_rushLaunched = m_openerDone = m_locked = false;
+    m_lastAttackEndFrame = m_attackArmy = 0;
+    m_nextExperimentFrame = FramesPerSecond * 60 * 4;
     m_reserveMinerals = m_reserveGas = 0;
     m_lastSwitchFrame = m_lastEvaluationFrame = m_lastRecordFrame = 0;
     m_switches = 0;
@@ -348,10 +350,7 @@ void Adaptive::Execute() {
     if (frame - m_lastEvaluationFrame >= EvaluationInterval) EvaluateComposition(false);
 
     const auto counts = Count();
-    const int gasWorkers = BWAPI::Broodwar->self()->gas() > 600 &&
-        BWAPI::Broodwar->self()->gas() > BWAPI::Broodwar->self()->minerals() ? 1 : 3;
-    for (auto unit : myUnits)
-        if (unit->getType() == BWAPI::UnitTypes::Zerg_Extractor && unit->isCompleted()) Tools::GatherGas(unit, gasWorkers);
+    AssignGasWorkers();
     BasesTools::SetOurBasePosition();
 
     const auto threats = Micro::GetBaseThreats();
@@ -373,6 +372,9 @@ void Adaptive::Execute() {
         Economy(counts, emergency);
         if (!emergency) QueenSupport(counts);
         if (!emergency) Upgrades(counts);
+        if (!emergency) NydusNetwork(counts);
+        if (!emergency) LateGameSupport(counts);
+        if (!emergency) TryExperiment(counts);
         MorphAdvancedUnits(counts);
         SpendArmyBudget(counts);
         SpendExcessMinerals(counts, emergency);
@@ -408,6 +410,28 @@ void Adaptive::Execute() {
     for (const auto& [id, type] : m_enemyUnits) if (NeedsDetection(type)) { needsDetection = true; break; }
     Tools::BalanceMineralWorkers();
     Micro::HiveTechMicroLoop(myUnits, {}, needsDetection);
+}
+
+// Split one global gas budget over the extractors, so extra geysers or lost drones never leave minerals unmined.
+void Adaptive::AssignGasWorkers() {
+    const auto self = BWAPI::Broodwar->self();
+    std::vector<BWAPI::Unit> extractors;
+    int drones = 0;
+    for (auto unit : self->getUnits()) {
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Extractor && unit->isCompleted()) extractors.push_back(unit);
+        else if (unit->getType() == BWAPI::UnitTypes::Zerg_Drone && unit->isCompleted()) ++drones;
+    }
+    int budget = CombatPolicy::GasWorkerBudget(drones, static_cast<int>(extractors.size()), self->minerals(), self->gas());
+    // Extractors at the main fill first; the order is stable so workers are not shuffled between geysers.
+    const auto start = BWAPI::Position(self->getStartLocation());
+    std::sort(extractors.begin(), extractors.end(), [start](BWAPI::Unit a, BWAPI::Unit b) {
+        return a->getDistance(start) != b->getDistance(start) ? a->getDistance(start) < b->getDistance(start) : a->getID() < b->getID();
+    });
+    for (auto extractor : extractors) {
+        const int workers = std::min(3, budget);
+        budget -= workers;
+        Tools::GatherGas(extractor, workers);
+    }
 }
 
 void Adaptive::Opener(const Counts& counts) {
@@ -679,6 +703,21 @@ void Adaptive::SpendArmyBudget(const Counts& counts) {
         return value;
     };
 
+    // Scourge first when enemy air outweighs our anti-air: Guardians and Ultralisks cannot shoot up.
+    int scourge = Started(BWAPI::UnitTypes::Zerg_Scourge);
+    const int scourgeWanted = HasTech(Tech::Spire, true) ? ScourgeWanted(counts) : 0;
+    const auto scourgeType = BWAPI::UnitTypes::Zerg_Scourge;
+    for (auto larva : self->getUnits()) {
+        if (scourge >= scourgeWanted) break;
+        if (larva->getType() != BWAPI::UnitTypes::Zerg_Larva || minerals < scourgeType.mineralPrice() ||
+            gas < scourgeType.gasPrice() || supply < scourgeType.supplyRequired() * 2 || !Tools::MorphUnit(larva, scourgeType)) continue;
+        supply -= scourgeType.supplyRequired() * 2;
+        minerals -= scourgeType.mineralPrice();
+        gas -= scourgeType.gasPrice();
+        scourge += 2;
+        m_decision = "scourge_vs_air";
+    }
+
     for (auto larva : self->getUnits()) {
         if (larva->getType() != BWAPI::UnitTypes::Zerg_Larva) continue;
         int total = 0;
@@ -776,6 +815,183 @@ void Adaptive::SpendExcessMinerals(const Counts& counts, bool emergency) {
     }
 }
 
+// Ground-heavy compositions go Hive and link the main to the forward-most Hatchery with a Nydus Canal,
+// so reinforcements reach the front without the long walk.
+void Adaptive::NydusNetwork(const Counts& counts) {
+    const auto self = BWAPI::Broodwar->self();
+    const auto& spec = Learning::Spec(m_composition);
+    const double ground = spec.Share(Army::Zergling) + spec.Share(Army::Hydralisk) + spec.Share(Army::Lurker) + spec.Share(Army::Ultralisk);
+    if (!CombatPolicy::WantsNydus(ground, RushPending(), counts.miningSites) || counts.drones < Gate(Gene::HiveDrones) ||
+        m_reserveGas > 0) return;
+    const auto reserve = [this](int minerals, int gas, const char* step) {
+        m_reserveMinerals = std::max(m_reserveMinerals, minerals);
+        m_reserveGas = std::max(m_reserveGas, gas);
+        m_decision = step;
+    };
+    const auto start = self->getStartLocation();
+    if (!HasTech(Tech::Lair, true)) return;
+    if (!HasTech(Tech::QueensNest, false)) {
+        reserve(150, 100, "nydus_queens_nest");
+        Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Queens_Nest, 1, start);
+        return;
+    }
+    if (!HasTech(Tech::Hive, false)) {
+        if (!HasTech(Tech::QueensNest, true)) return;
+        reserve(200, 150, "nydus_hive");
+        MorphFirst(BWAPI::UnitTypes::Zerg_Lair, BWAPI::UnitTypes::Zerg_Hive);
+        return;
+    }
+    if (!HasTech(Tech::Hive, true)) return;
+    // The forward Hatchery: the one of ours closest to the enemy, and far enough from the main to matter.
+    const auto enemyBase = BasesTools::GetEnemyBasePosition();
+    const auto home = BWAPI::Position(start);
+    BWAPI::Unit forward = nullptr;
+    for (auto unit : self->getUnits()) {
+        if (!unit->getType().isResourceDepot() || !unit->isCompleted() || unit->getDistance(home) < 32 * 30) continue;
+        if (!forward || (enemyBase.isValid() && unit->getDistance(enemyBase) < forward->getDistance(enemyBase))) forward = unit;
+    }
+    if (!forward) return;
+    BWAPI::Unit entrance = nullptr;
+    for (auto unit : self->getUnits()) {
+        if (unit->getType() != BWAPI::UnitTypes::Zerg_Nydus_Canal) continue;
+        if (unit->getNydusExit() || !unit->isCompleted()) return; // Linked, or still building.
+        if (unit->getDistance(home) < 32 * 16) entrance = unit;
+    }
+    if (!entrance) {
+        reserve(150, 0, "nydus_canal");
+        Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Nydus_Canal, 1, start);
+        return;
+    }
+    reserve(150, 0, "nydus_exit");
+    if (Tools::BuildNydusExit(entrance, forward->getTilePosition())) MatchLog::Event("nydus", "exit ordered");
+}
+
+// Very late in long games, Defilers join the ground army: Consume, then Plague, then the Defilers themselves.
+void Adaptive::LateGameSupport(const Counts& counts) {
+    const auto self = BWAPI::Broodwar->self();
+    int ground = 0;
+    for (auto army : { Army::Zergling, Army::Hydralisk, Army::Lurker, Army::Ultralisk })
+        ground += counts.army[static_cast<int>(army)] * ArmyType(army).supplyRequired();
+    const double minutes = BWAPI::Broodwar->getFrameCount() / double(FramesPerSecond * 60);
+    const int target = CombatPolicy::DefilerTarget(minutes, self->supplyUsed(), ground);
+    if (target == 0 || !HasTech(Tech::Hive, true)) return;
+    const auto mound = BWAPI::UnitTypes::Zerg_Defiler_Mound;
+    if (Started(mound) == 0) {
+        m_reserveMinerals = std::max(m_reserveMinerals, 100);
+        m_reserveGas = std::max(m_reserveGas, 100);
+        m_decision = "tech_defiler_mound";
+        Tools::TryBuildBuilding(mound, 1, self->getStartLocation());
+        return;
+    }
+    if (Ready(mound) == 0) return;
+    const int defilers = Started(BWAPI::UnitTypes::Zerg_Defiler);
+    if (defilers > 0) {
+        for (auto tech : { BWAPI::TechTypes::Consume, BWAPI::TechTypes::Plague }) {
+            if (self->hasResearched(tech)) continue;
+            if (!self->isResearching(tech)) {
+                m_reserveMinerals = std::max(m_reserveMinerals, tech.mineralPrice());
+                m_reserveGas = std::max(m_reserveGas, tech.gasPrice());
+                Tools::ResearchTech(tech);
+            }
+            break;
+        }
+    }
+    if (defilers < target && Tools::MorphLarva(BWAPI::UnitTypes::Zerg_Defiler)) {
+        m_decision = "defiler";
+        MatchLog::Event("defiler", "count=" + std::to_string(defilers + 1) + " target=" + std::to_string(target));
+    }
+}
+
+// Scourge wanted against scouted enemy air, when a Spire is up and our other anti-air falls short.
+int Adaptive::ScourgeWanted(const Counts& counts) const {
+    int hitPoints = 0, supply = 0;
+    for (const auto& [id, type] : m_enemyUnits) {
+        if (!type.isFlyer() || type.isBuilding() || type == BWAPI::UnitTypes::Zerg_Overlord ||
+            type == BWAPI::UnitTypes::Protoss_Interceptor || type == BWAPI::UnitTypes::Protoss_Scarab ||
+            type == BWAPI::UnitTypes::Protoss_Observer) continue;
+        hitPoints += type.maxHitPoints() + type.maxShields();
+        supply += std::max(2, type.supplyRequired());
+    }
+    int antiAir = 0;
+    for (auto army : { Army::Hydralisk, Army::Mutalisk, Army::Devourer })
+        antiAir += counts.army[static_cast<int>(army)] * ArmyType(army).supplyRequired();
+    return CombatPolicy::ScourgeTarget(hitPoints, supply, antiAir);
+}
+
+// Now and then buy something off-plan, and let the learner judge from the match result whether it helped.
+void Adaptive::TryExperiment(const Counts& counts) {
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    if (frame < m_nextExperimentFrame) return;
+    m_nextExperimentFrame = frame + FramesPerSecond * 30;
+    if (!m_learner.RollExperiment()) return;
+    const auto self = BWAPI::Broodwar->self();
+    static const BWAPI::UnitType candidates[] = {
+        BWAPI::UnitTypes::Zerg_Zergling, BWAPI::UnitTypes::Zerg_Hydralisk, BWAPI::UnitTypes::Zerg_Mutalisk,
+        BWAPI::UnitTypes::Zerg_Scourge, BWAPI::UnitTypes::Zerg_Queen, BWAPI::UnitTypes::Zerg_Ultralisk,
+        BWAPI::UnitTypes::Zerg_Defiler, BWAPI::UnitTypes::Zerg_Drone, BWAPI::UnitTypes::Zerg_Overlord,
+        BWAPI::UnitTypes::Zerg_Lurker, BWAPI::UnitTypes::Zerg_Guardian, BWAPI::UnitTypes::Zerg_Devourer,
+        BWAPI::UnitTypes::Zerg_Hatchery, BWAPI::UnitTypes::Zerg_Evolution_Chamber, BWAPI::UnitTypes::Zerg_Hydralisk_Den,
+        BWAPI::UnitTypes::Zerg_Spire, BWAPI::UnitTypes::Zerg_Queens_Nest, BWAPI::UnitTypes::Zerg_Extractor,
+        BWAPI::UnitTypes::Zerg_Sunken_Colony, BWAPI::UnitTypes::Zerg_Spore_Colony,
+    };
+    // Only what can be made right now with what is left after this frame's plan.
+    const int minerals = self->minerals() - m_reserveMinerals - PendingOrderMinerals();
+    const int gas = self->gas() - m_reserveGas;
+    std::vector<std::string> options;
+    std::map<std::string, BWAPI::UnitType> byName;
+    for (auto type : candidates) {
+        const auto source = type.whatBuilds().first;
+        const int colonyCost = type == BWAPI::UnitTypes::Zerg_Sunken_Colony || type == BWAPI::UnitTypes::Zerg_Spore_Colony ? 75 : 0;
+        if (minerals < type.mineralPrice() + colonyCost || gas < type.gasPrice()) continue;
+        bool requirements = true;
+        for (const auto& [required, amount] : type.requiredUnits()) {
+            if (required == BWAPI::UnitTypes::Zerg_Creep_Colony || required == BWAPI::UnitTypes::Zerg_Larva ||
+                required == BWAPI::UnitTypes::Zerg_Drone) continue;
+            if (required == BWAPI::UnitTypes::Zerg_Lair && HasTech(Tech::Lair, true)) continue;
+            if (required == BWAPI::UnitTypes::Zerg_Spire && HasTech(Tech::Spire, true)) continue;
+            if (required == BWAPI::UnitTypes::Zerg_Hatchery) continue;
+            requirements = requirements && Ready(required) > 0;
+        }
+        if (type.requiredTech() != BWAPI::TechTypes::None && !self->hasResearched(type.requiredTech())) requirements = false;
+        if (!requirements || (type.supplyRequired() > 0 && self->supplyTotal() - self->supplyUsed() < type.supplyRequired() * 2)) continue;
+        if (!type.isBuilding() && source != BWAPI::UnitTypes::Zerg_Larva && Ready(source) == 0) continue;
+        if (type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Hatchery && type != BWAPI::UnitTypes::Zerg_Extractor &&
+            !type.isResourceDepot() && colonyCost == 0 && Started(type) > 0) continue; // One tech building of each kind.
+        std::string name = type.getName();
+        std::replace(name.begin(), name.end(), ' ', '_');
+        options.push_back(name);
+        byName[name] = type;
+    }
+    const auto name = m_learner.PickExperiment(options);
+    if (name.empty()) return;
+    const auto type = byName[name];
+    const auto source = type.whatBuilds().first;
+    const auto start = self->getStartLocation();
+    bool accepted = false;
+    if (type == BWAPI::UnitTypes::Zerg_Hatchery) accepted = Tools::BuildMacroHatchery();
+    else if (type == BWAPI::UnitTypes::Zerg_Extractor) {
+        for (auto depot : self->getUnits())
+            if (!accepted && depot->getType().isResourceDepot() && depot->isCompleted()) accepted = Tools::EnsureBaseGas(depot) &&
+                Tools::IsQueued(BWAPI::UnitTypes::Zerg_Extractor).isValid();
+    } else if (type == BWAPI::UnitTypes::Zerg_Sunken_Colony || type == BWAPI::UnitTypes::Zerg_Spore_Colony) {
+        for (auto depot : self->getUnits()) {
+            if (accepted || !depot->getType().isResourceDepot() || !depot->isCompleted()) continue;
+            int colonies = 0;
+            for (auto unit : depot->getUnitsInRadius(256, BWAPI::Filter::IsOwned))
+                if (unit->getType() == type || unit->getType() == BWAPI::UnitTypes::Zerg_Creep_Colony) ++colonies;
+            accepted = Tools::EnsureStaticDefense(depot, colonies + 1, type);
+        }
+    } else if (type.isBuilding()) accepted = Tools::TryBuildBuilding(type, 1, start);
+    else if (source == BWAPI::UnitTypes::Zerg_Larva) accepted = Tools::MorphLarva(type);
+    else accepted = MorphFirst(source, type);
+    if (!accepted) return;
+    m_learner.RecordExperiment(name);
+    m_decision = "experiment";
+    const double advantage = m_learner.GetExperiments().Advantage(name);
+    BWAPI::Broodwar->printf("Adaptive: experiment %s (learned advantage %+.2f)", name.c_str(), advantage);
+    MatchLog::Event("experiment", name + " advantage=" + std::to_string(advantage));
+}
+
 // Scouted enemy army in BWAPI supply units, with static defense counted as a few units' worth.
 int Adaptive::KnownEnemyArmySupply() const {
     int supply = 0;
@@ -791,7 +1007,11 @@ int Adaptive::KnownEnemyArmySupply() const {
 }
 
 void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
-    const int threshold = RushPending() ? m_genome.GetInt(Gene::RushAttackSupply) : m_genome.GetInt(Gene::AttackSupply);
+    const int frame = BWAPI::Broodwar->getFrameCount();
+    const int baseThreshold = RushPending() ? m_genome.GetInt(Gene::RushAttackSupply) : m_genome.GetInt(Gene::AttackSupply);
+    // Waiting costs: every idle minute lowers the size needed to move out.
+    const int threshold = RushPending() ? baseThreshold :
+        CombatPolicy::PatientAttackSupply(baseThreshold, (frame - m_lastAttackEndFrame) / double(FramesPerSecond));
     const int army = counts.armySupply / 2;
     const bool maxed = BWAPI::Broodwar->self()->supplyUsed() >= 380;
     // Attack only when the scouted enemy army is clearly beatable; a small share of time
@@ -800,24 +1020,31 @@ void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
     const bool gamble = CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount());
     const bool winnable = maxed ? !CombatPolicy::AttackLost(counts.armySupply, enemyArmy)
                                 : CombatPolicy::AttackWinnable(counts.armySupply, enemyArmy, gamble);
-    if (!m_attacking && !emergency && (army >= threshold || maxed)) {
+    bool scouted = false;
+    for (const auto& [id, type] : m_enemyUnits) scouted = scouted || type.isBuilding();
+    // A clear edge over everything scouted is reason enough to go, whatever the planned size.
+    const bool advantage = CombatPolicy::AttackOnAdvantage(counts.armySupply, enemyArmy, baseThreshold, scouted);
+    if (!m_attacking && !emergency && (army >= threshold || maxed || advantage)) {
         if (!winnable) {
             m_decision = "hold_outmatched";
             return;
         }
         m_attacking = true;
+        m_attackArmy = army;
         if (Learning::Spec(m_composition).rush) m_rushLaunched = true;
         Micro::SetMode(Micro::MicroMode::Aggressive);
         MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" + std::to_string(army) +
-            " enemy=" + std::to_string(enemyArmy / 2) + (gamble ? " close_fight" : ""));
-    } else if (m_attacking && (emergency ||
-                               (!CombatPolicy::Overwhelming(counts.armySupply, enemyArmy) &&
-                                army < threshold * m_genome.Get(Gene::RetreatFraction)) ||
-                               CombatPolicy::AttackLost(counts.armySupply, enemyArmy))) {
+            " enemy=" + std::to_string(enemyArmy / 2) + " threshold=" + std::to_string(threshold) +
+            (advantage && army < threshold ? " advantage" : "") + (gamble ? " close_fight" : ""));
+    } else if (m_attacking) {
+        // Depletion is measured against the army the attack left with, since an early attack may leave small.
+        const bool depleted = !CombatPolicy::Overwhelming(counts.armySupply, enemyArmy) &&
+            army < std::min(threshold, std::max(m_attackArmy, 1)) * m_genome.Get(Gene::RetreatFraction);
+        if (!emergency && !depleted && !CombatPolicy::AttackLost(counts.armySupply, enemyArmy)) return;
         m_attacking = false;
+        m_lastAttackEndFrame = frame;
         Micro::SetMode(Micro::MicroMode::Defensive);
-        MatchLog::Event("regroup", emergency ? "base_emergency" :
-            army < threshold * m_genome.Get(Gene::RetreatFraction) ? "army_depleted" : "outmatched");
+        MatchLog::Event("regroup", emergency ? "base_emergency" : depleted ? "army_depleted" : "outmatched");
     }
 }
 

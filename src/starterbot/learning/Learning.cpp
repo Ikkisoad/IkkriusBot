@@ -262,11 +262,46 @@ void CompositionBandit::Update(int context, Composition composition, double weig
     arm.value += weight * (Clamp01(reward) - arm.value) / arm.visits;
 }
 
+double ExperimentBandit::Advantage(const std::string& item) const {
+    const double baseline = m_baseline.visits > 0 ? m_baseline.value : 0.5;
+    const auto found = m_items.find(item);
+    if (found == m_items.end()) return 0.0;
+    constexpr double priorWeight = 3.0;
+    const double estimate = (found->second.visits * found->second.value + priorWeight * baseline) / (found->second.visits + priorWeight);
+    return estimate - baseline;
+}
+
+std::string ExperimentBandit::Pick(const std::vector<std::string>& options, std::mt19937& rng) const {
+    if (options.empty()) return {};
+    std::vector<double> weights;
+    for (const auto& option : options) weights.push_back(std::exp(std::clamp(Advantage(option) / Temperature, -5.0, 5.0)));
+    std::discrete_distribution<size_t> pick(weights.begin(), weights.end());
+    return options[pick(rng)];
+}
+
+void ExperimentBandit::Update(const std::vector<std::string>& items, double reward) {
+    reward = Clamp01(reward);
+    m_baseline.visits += 1;
+    m_baseline.value += (reward - m_baseline.value) / m_baseline.visits;
+    // Each item counts once per game, however often it was bought.
+    std::vector<std::string> unique(items);
+    std::sort(unique.begin(), unique.end());
+    unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
+    for (const auto& item : unique) {
+        if (item.empty()) continue;
+        auto& arm = m_items[item];
+        arm.visits += 1;
+        arm.value += (reward - arm.value) / arm.visits;
+    }
+}
+
 Learner::Learner(unsigned seed) : m_rng(seed) {}
 
 void Learner::Reset() {
     m_population = Population();
     m_bandit = CompositionBandit();
+    m_experimentBandit = ExperimentBandit();
+    m_experiments.clear();
     m_current = -1;
     m_activeSeconds.clear();
 }
@@ -279,6 +314,7 @@ bool Learner::Load(const std::string& path) {
     if (!(file >> tag >> version) || tag != "IKKRIUS_LEARNING" || version != 1) return false;
     Population population;
     CompositionBandit bandit;
+    ExperimentBandit experiments;
     std::vector<int> geneOrder;
     std::string line;
     while (file >> tag) {
@@ -305,6 +341,12 @@ bool Learner::Load(const std::string& path) {
             file >> context >> name >> arm.visits >> arm.value;
             Composition composition;
             if (ParseComposition(name, composition)) bandit.Arms()[{ context, static_cast<int>(composition) }] = arm;
+        } else if (tag == "experiment") {
+            std::string name; ArmStats arm;
+            file >> name >> arm.visits >> arm.value;
+            experiments.Items()[name] = arm;
+        } else if (tag == "experiment_baseline") {
+            file >> experiments.Baseline().visits >> experiments.Baseline().value;
         } else {
             std::getline(file, line);
         }
@@ -312,6 +354,7 @@ bool Learner::Load(const std::string& path) {
     }
     m_population = std::move(population);
     m_bandit = std::move(bandit);
+    m_experimentBandit = std::move(experiments);
     return true;
 }
 
@@ -333,6 +376,11 @@ bool Learner::Save(const std::string& path) const {
         }
         for (const auto& [key, arm] : m_bandit.Arms())
             file << "arm " << key.first << ' ' << compositionNames[key.second] << ' ' << arm.visits << ' ' << arm.value << "\n";
+        // Older builds skip these unknown tags, so the file stays readable by them.
+        const auto& baseline = m_experimentBandit.Baseline();
+        if (baseline.visits > 0) file << "experiment_baseline " << baseline.visits << ' ' << baseline.value << "\n";
+        for (const auto& [name, arm] : m_experimentBandit.Items())
+            file << "experiment " << name << ' ' << arm.visits << ' ' << arm.value << "\n";
         if (!file) return false;
     }
     std::remove(path.c_str());
@@ -341,6 +389,7 @@ bool Learner::Save(const std::string& path) const {
 
 const Genome& Learner::BeginGame(bool explore) {
     m_activeSeconds.clear();
+    m_experiments.clear();
     m_explore = explore;
     auto& individuals = m_population.Individuals();
     if (explore) {
@@ -410,6 +459,23 @@ void Learner::EndGame(double reward) {
             m_bandit.Update(key.first, static_cast<Composition>(key.second), seconds / total, reward);
     }
     m_activeSeconds.clear();
+    m_experimentBandit.Update(m_experiments, reward);
+    m_experiments.clear();
+}
+
+bool Learner::RollExperiment() {
+    return m_explore && std::uniform_real_distribution<double>(0.0, 1.0)(m_rng) < ExperimentBandit::Chance;
+}
+
+std::string Learner::PickExperiment(const std::vector<std::string>& options) {
+    return m_experimentBandit.Pick(options, m_rng);
+}
+
+void Learner::RecordExperiment(const std::string& item) {
+    // Names are saved as single tokens.
+    std::string name(item);
+    std::replace(name.begin(), name.end(), ' ', '_');
+    m_experiments.push_back(name);
 }
 
 double Reward(bool won, double killScore, double lossScore, double minutes) {

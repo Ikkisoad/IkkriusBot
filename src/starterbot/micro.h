@@ -65,6 +65,14 @@ namespace Micro
     // Friendly spell areas (Ensnare) that our own units step out of until the spell lands.
     void MarkSpellArea(BWAPI::Position center, int radius);
     bool DodgeFriendlySpell(BWAPI::Unit unit);
+    // Ground units ride a Nydus Canal when entering here and walking from the far end is much shorter.
+    bool UseNydus(BWAPI::Unit unit, BWAPI::Position destination);
+    // Scourge hunt enemy air (never Interceptors), sending only enough to kill each target.
+    void ScourgeLoop(BWAPI::Unit scourge, const BWAPI::Unitset& threats, BWAPI::Position guard);
+    // Defilers trail the ground army: Dark Swarm over allies under ranged fire, Plague on clumps, Consume for energy.
+    void DefilerLoop(BWAPI::Unit defiler, BWAPI::Position follow, BWAPI::Position home);
+    // A Queen with Spawn Broodlings energy flies out to a lightly guarded, valuable ground unit.
+    bool BroodlingHunt(BWAPI::Unit queen);
     // While Guardians are on the field, targets under enemy static defense are left to them.
     bool AvoidsStaticDefense(BWAPI::Unit unit, BWAPI::Unit enemy);
 }

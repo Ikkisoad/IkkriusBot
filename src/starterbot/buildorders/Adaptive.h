@@ -44,6 +44,9 @@ private:
     bool m_attacking = false;
     bool m_rushLaunched = false;
     bool m_openerDone = false;
+    int m_lastAttackEndFrame = 0;  // When the army last stood down (or the match start).
+    int m_attackArmy = 0;          // Army supply the current attack left with.
+    int m_nextExperimentFrame = 0;
     int m_reserveMinerals = 0;
     int m_reserveGas = 0;
     std::string m_enemyRace = "Unknown";
@@ -74,6 +77,11 @@ private:
     void MorphAdvancedUnits(const Counts& counts);
     void SpendArmyBudget(const Counts& counts);
     void SpendExcessMinerals(const Counts& counts, bool emergency);
+    void AssignGasWorkers();
+    void NydusNetwork(const Counts& counts);
+    void LateGameSupport(const Counts& counts);
+    int ScourgeWanted(const Counts& counts) const;
+    void TryExperiment(const Counts& counts);
     int KnownEnemyArmySupply() const;
     void ManageAttack(const Counts& counts, bool emergency);
 };

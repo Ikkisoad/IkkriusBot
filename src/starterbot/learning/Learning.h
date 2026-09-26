@@ -140,6 +140,27 @@ namespace Learning {
         std::map<std::pair<int, int>, ArmStats> m_arms;
     };
 
+    // Occasional off-plan production: at random moments an extra unit or structure is bought, and each
+    // item's games are compared with the average game to learn whether it was advantageous. Items that
+    // preceded better results are picked more often; ones that preceded worse results fade out.
+    class ExperimentBandit {
+    public:
+        static constexpr double Chance = 0.06;   // Per decision window (Adaptive rolls every 30 seconds).
+        static constexpr double Temperature = 0.08;
+        // Item estimate shrunk toward the baseline, minus the baseline: > 0 means it tended to help.
+        double Advantage(const std::string& item) const;
+        std::string Pick(const std::vector<std::string>& options, std::mt19937& rng) const;
+        void Update(const std::vector<std::string>& items, double reward);
+        std::map<std::string, ArmStats>& Items() { return m_items; }
+        const std::map<std::string, ArmStats>& Items() const { return m_items; }
+        ArmStats& Baseline() { return m_baseline; }
+        const ArmStats& Baseline() const { return m_baseline; }
+
+    private:
+        std::map<std::string, ArmStats> m_items;
+        ArmStats m_baseline;
+    };
+
     struct Decision {
         Composition composition;
         bool switched;
@@ -166,6 +187,13 @@ namespace Learning {
         void RecordActive(int context, Composition composition, double seconds);
         void EndGame(double reward);
 
+        // True on a small share of decision windows; then PickExperiment names the item to try.
+        bool RollExperiment();
+        std::string PickExperiment(const std::vector<std::string>& options);
+        void RecordExperiment(const std::string& item);
+        const std::vector<std::string>& Experiments() const { return m_experiments; }
+        ExperimentBandit& GetExperiments() { return m_experimentBandit; }
+
         Population& GetPopulation() { return m_population; }
         CompositionBandit& GetBandit() { return m_bandit; }
         std::mt19937& Rng() { return m_rng; }
@@ -174,6 +202,8 @@ namespace Learning {
         std::mt19937 m_rng;
         Population m_population;
         CompositionBandit m_bandit;
+        ExperimentBandit m_experimentBandit;
+        std::vector<std::string> m_experiments;
         int m_current = -1;
         bool m_explore = true;
         Genome m_fallback = Genome::Default();

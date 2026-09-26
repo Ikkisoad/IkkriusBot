@@ -166,6 +166,36 @@ int main() {
     assert(std::abs(old.GetPopulation().Individuals()[0].genome.Get(Gene::AttackSupply) - 40) < 1e-6);
     assert(!old.Load("missing.txt"));
 
+    // Off-plan experiments: items that preceded better results gain advantage and are picked more often.
+    Learner trial(11);
+    for (int game = 0; game < 40; ++game) {
+        trial.BeginGame();
+        const bool good = game % 2 == 0;
+        trial.RecordExperiment(good ? "Zerg Scourge" : "Zerg Spire");
+        trial.RecordExperiment(good ? "Zerg Scourge" : "Zerg Spire"); // Counted once per game.
+        trial.EndGame(good ? 0.9 : 0.2);
+    }
+    auto& experiments = trial.GetExperiments();
+    assert(std::abs(experiments.Items()["Zerg_Scourge"].visits - 20) < 1e-9);
+    assert(experiments.Advantage("Zerg_Scourge") > 0.2 && experiments.Advantage("Zerg_Spire") < -0.2);
+    assert(experiments.Advantage("Zerg_Never_Tried") == 0.0);
+    int scourgePicks = 0;
+    for (int i = 0; i < 400; ++i) scourgePicks += trial.PickExperiment({"Zerg_Scourge", "Zerg_Spire", "Zerg_Never_Tried"}) == "Zerg_Scourge";
+    assert(scourgePicks > 250);
+    assert(trial.PickExperiment({}).empty());
+    int rolls = 0;
+    for (int i = 0; i < 5000; ++i) rolls += trial.RollExperiment();
+    assert(rolls > 150 && rolls < 450); // A small chance per window.
+    assert(trial.Save("experiments.txt"));
+    Learner reloaded(3);
+    assert(reloaded.Load("experiments.txt"));
+    assert(std::abs(reloaded.GetExperiments().Advantage("Zerg_Scourge") - experiments.Advantage("Zerg_Scourge")) < 1e-4);
+    Learner quiet(4);
+    quiet.BeginGame(false);
+    int quietRolls = 0;
+    for (int i = 0; i < 1000; ++i) quietRolls += quiet.RollExperiment();
+    assert(quietRolls == 0); // No experiments while learning is off.
+
     // Rewards stay in [0, 1] and always rank a win above a loss.
     assert(Reward(true, 0, 5000, 3) > Reward(false, 5000, 0, 60));
     for (double kills : {0.0, 100.0, 1e6}) for (double losses : {0.0, 100.0, 1e6}) {

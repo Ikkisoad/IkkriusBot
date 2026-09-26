@@ -22,6 +22,8 @@ namespace Tools
     void FixLongDistanceMining();
     void GatherGas(BWAPI::Unit extractor, int targetWorkers = 3);
     bool BuildMacroHatchery();
+    // Place the far end of a Nydus Canal on our creep near `site` (a forward Hatchery).
+    bool BuildNydusExit(BWAPI::Unit canal, BWAPI::TilePosition site);
     bool EnsureBaseGas(BWAPI::Unit depot);
     bool EnsureGroundDefense(BWAPI::Unit depot, int target);
     // Creep Colonies at a base, morphed into `finalType` (Sunken or Spore) once complete.

@@ -597,6 +597,31 @@ static BWAPI::TilePosition FindClearBuildTile(BWAPI::UnitType type, BWAPI::TileP
     return bestPos;
 }
 
+bool Tools::BuildNydusExit(BWAPI::Unit canal, BWAPI::TilePosition site) {
+    const auto type = BWAPI::UnitTypes::Zerg_Nydus_Canal;
+    if (!canal || !canal->isCompleted() || canal->getNydusExit() || !site.isValid() ||
+        canal->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return false;
+    const auto command = canal->getLastCommand();
+    if (command.getType() == BWAPI::UnitCommandTypes::Build &&
+        BWAPI::Broodwar->getFrameCount() - canal->getLastCommandFrame() <= BWAPI::Broodwar->getLatencyFrames() + 24) return false;
+    if (BWAPI::Broodwar->self()->minerals() < type.mineralPrice() || BWAPI::Broodwar->self()->gas() < type.gasPrice()) return false;
+    // Closest clear creep tile to the Hatchery, off its mining paths.
+    BWAPI::TilePosition best = BWAPI::TilePositions::Invalid;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (int dx = -8; dx <= 8; ++dx) {
+        for (int dy = -8; dy <= 8; ++dy) {
+            const BWAPI::TilePosition candidate = site + BWAPI::TilePosition(dx, dy);
+            if (!candidate.isValid() || !BWAPI::Broodwar->canBuildHere(candidate, type, canal, true) ||
+                BlocksResourceGathering(candidate, type)) continue;
+            const int distance = dx * dx + dy * dy;
+            if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+        }
+    }
+    const bool accepted = best.isValid() && canal->build(type, best);
+    MatchLog::Command("nydus_exit", type.getName(), accepted);
+    return accepted;
+}
+
 bool Tools::BuildBuildingOptimal(BWAPI::UnitType type, BWAPI::TilePosition desiredPos) {
     if (!desiredPos.isValid()) return false;
     const auto reserve = GetConstructionReserve();

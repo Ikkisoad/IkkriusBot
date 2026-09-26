@@ -112,9 +112,11 @@ std::vector<BWAPI::Unit> covered; // Enemies sitting under static defense left t
 bool AvoidsStaticDefense(BWAPI::Unit,BWAPI::Unit enemy) { return std::find(covered.begin(),covered.end(),enemy)!=covered.end(); }
 void FallBack(BWAPI::Unit,BWAPI::Unit threat,BWAPI::Position) { fellBackFrom=threat; }
 void GroundArmyLoop(BWAPI::Unit,const BWAPI::Unitset&,BWAPI::Position,BWAPI::Position);
+bool nydusTaken=false;
+bool UseNydus(BWAPI::Unit,BWAPI::Position) { return nydusTaken; }
 }
 """
-source+='BWAPI::Position siegeEscort{-999};\n'
+source+='BWAPI::Position siegeEscort{-999}, groundObjective{-999};\n'
 source+=function('void Micro::SmartAttackMove')
 source+=function('void Micro::LurkerSupportLoop')
 source+=function('void Micro::GroundArmyLoop')
@@ -207,6 +209,56 @@ int main() {
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::attacked==nullptr && hydra.attackedAt.x==700);
     Micro::covered.clear(); siegeEscort={-999};
+    // The army marches on the target; only units ahead of the main body wait for it (no collapse onto a midpoint).
+    FakeUnit runner{{8,1},&game.player,1500}; runner.idle=true; runner.neighbors={&runner};
+    game.frame+=1; Micro::GroundArmyLoop(&runner,{}, {-400},{0});
+    assert(runner.attackedAt.x==0); // Far ahead of the body: wait for it.
+    runner.x=-500; game.frame+=1; Micro::GroundArmyLoop(&runner,{}, {-400},{0});
+    assert(runner.attackedAt.x==2000); // Behind the body: keep marching instead of walking to the midpoint.
+    groundObjective={1200}; game.frame+=1; Micro::GroundArmyLoop(&runner,{}, {-400},{0});
+    assert(runner.attackedAt.x==1200); // Nearest known enemy base first.
+    const int attacksBefore=runner.attacks; Micro::nydusTaken=true; game.frame+=1;
+    Micro::GroundArmyLoop(&runner,{}, {-400},{0});
+    assert(runner.attacks==attacksBefore); // Riding the Nydus replaces the walk.
+    Micro::nydusTaken=false; groundObjective={-999};
+    struct P { int x=0, y=0; };
+    const std::vector<P> army={{0,0},{2000,0},{2040,0},{2010,30},{1990,-20},{1000,0}};
+    const P body=CombatPolicy::MainBody(army,384,P{});
+    assert(body.x>1900 && body.x<2100); // Densest cluster, not the mean (about 1507).
+    assert(CombatPolicy::MainBody(std::vector<P>{},384,P{7,7}).x==7);
+    assert(CombatPolicy::WaitForMainBody(500,2000,1500) && !CombatPolicy::WaitForMainBody(2500,2000,500));
+    assert(!CombatPolicy::WaitForMainBody(1900,2000,200)); // Near the body: no waiting.
+    // Attack timing: go on a clear edge over the scouted army, and waiting lowers the required size.
+    assert(CombatPolicy::AttackOnAdvantage(40,20,40,true)); // 20 supply vs 10: go before the 40-supply plan.
+    assert(!CombatPolicy::AttackOnAdvantage(40,30,40,true));
+    assert(!CombatPolicy::AttackOnAdvantage(16,4,40,true)); // Too small to be an army.
+    assert(!CombatPolicy::AttackOnAdvantage(48,0,40,false) && CombatPolicy::AttackOnAdvantage(48,0,40,true));
+    assert(CombatPolicy::PatientAttackSupply(60,0)==60 && CombatPolicy::PatientAttackSupply(60,120)==48);
+    assert(CombatPolicy::PatientAttackSupply(60,3600)==30 && CombatPolicy::PatientAttackSupply(20,3600)==12);
+    // Gas never starves minerals.
+    assert(CombatPolicy::GasWorkerBudget(20,2,500,100)==6);
+    assert(CombatPolicy::GasWorkerBudget(9,3,500,100)==1);
+    assert(CombatPolicy::GasWorkerBudget(12,4,500,100)==4);
+    assert(CombatPolicy::GasWorkerBudget(30,4,100,700)==4);
+    assert(CombatPolicy::GasWorkerBudget(40,4,100,1200)==0);
+    // Scourge only against air our anti-air cannot cover, in pairs.
+    assert(CombatPolicy::ScourgeTarget(0,0,0)==0);
+    assert(CombatPolicy::ScourgeTarget(1000,12,0)==10);
+    assert(CombatPolicy::ScourgeTarget(1000,12,18)==0);
+    assert(CombatPolicy::ScourgeTarget(100000,200,0)==24);
+    assert(CombatPolicy::ScourgeNeeded(500)==5 && CombatPolicy::ScourgeNeeded(1)==1);
+    // Defilers only very late with a real ground army.
+    assert(CombatPolicy::DefilerTarget(15,380,200)==0 && CombatPolicy::DefilerTarget(22,250,200)==0);
+    assert(CombatPolicy::DefilerTarget(22,320,120)==3 && CombatPolicy::DefilerTarget(30,200,400)==4);
+    assert(CombatPolicy::DefilerTarget(30,300,20)==0);
+    // Broodling fishing: valuable, close, lightly guarded.
+    assert(CombatPolicy::BroodlingHuntScore(850,800,0)>0);
+    assert(CombatPolicy::BroodlingHuntScore(150,100,0)==0 && CombatPolicy::BroodlingHuntScore(850,800,4)==0);
+    assert(CombatPolicy::BroodlingHuntScore(850,800,0)>CombatPolicy::BroodlingHuntScore(850,800,2));
+    assert(CombatPolicy::BroodlingHuntScore(850,CombatPolicy::BroodlingHuntRange+1,0)==0);
+    // Nydus for ground-heavy compositions, taken only when it saves real distance.
+    assert(CombatPolicy::WantsNydus(0.5,false,2) && !CombatPolicy::WantsNydus(0.4,false,3) && !CombatPolicy::WantsNydus(1.0,true,2));
+    assert(CombatPolicy::NydusShortcut(100,300,3000) && !CombatPolicy::NydusShortcut(100,2800,3000) && !CombatPolicy::NydusShortcut(900,0,5000));
     std::cout << "Ground combat and Lurker regressions passed.\n";
 }
 """
