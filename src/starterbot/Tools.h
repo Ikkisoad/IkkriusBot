@@ -26,6 +26,8 @@ namespace Tools
     bool EnsureGroundDefense(BWAPI::Unit depot, int target);
     // Creep Colonies at a base, morphed into `finalType` (Sunken or Spore) once complete.
     bool EnsureStaticDefense(BWAPI::Unit depot, int target, BWAPI::UnitType finalType);
+    bool EnsureBaseDefense(BWAPI::Unit depot, int sunkens, int spores);
+    bool BuildSurplusDefense(int reserveMinerals);
     BWAPI::Unit GetDepot();
 
     bool TryBuildBuilding(BWAPI::UnitType building, int limitAmount, BWAPI::TilePosition desiredPos);

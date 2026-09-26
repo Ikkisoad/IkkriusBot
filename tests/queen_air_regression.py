@@ -114,7 +114,9 @@ bool QueenCastLoop(BWAPI::Unit,BWAPI::Unitset);
 std::vector<BWAPI::Unitset> GetHydraGroups(const BWAPI::Unitset&);
 void DevourerEscortLoop(BWAPI::Unit,BWAPI::Position);
 BWAPI::Unit attacked=nullptr;
-int moves=0;
+int moves=0, marked=0;
+BWAPI::Position markedAt;
+void MarkSpellArea(BWAPI::Position center,int) { ++marked; markedAt=center; }
 void SmartAttackUnit(BWAPI::Unit,BWAPI::Unit target) { attacked=target; }
 void SmartMove(BWAPI::Unit,BWAPI::Position) { ++moves; }
 }
@@ -154,6 +156,21 @@ int main() {
     assert(!Micro::QueenCastLoop(&queen2,{&marine1,&marine2,&marine3}));
     queen2.energy=74; marine1.ensnared=marine2.ensnared=marine3.ensnared=false;
     assert(!Micro::QueenCastLoop(&queen2,{&marine1,&marine2,&marine3}));
+    assert(Micro::marked==1 && Micro::markedAt.x>=100); // Allies are told where the cast lands.
+
+    // Our own attackers inside the cloud: never Ensnare three enemies on top of a Zergling.
+    frame+=40; queen2.energy=75; queen2.lastFrame=-100; queen2.command={}; queen2.casts=0;
+    FakeUnit ling{{40},&game.player,40,{120,10}};
+    game.player.units.insert(&ling);
+    assert(!Micro::QueenCastLoop(&queen2,{&marine1,&marine2,&marine3}));
+    assert(queen2.casts==0 && Micro::marked==1);
+    // Enemies clear of our unit are still worth it: aim at them instead.
+    FakeUnit marine4{{20},&enemy,23,{240,0}}, marine5{{20},&enemy,24,{260,0}}, marine6{{20},&enemy,25,{280,0}};
+    assert(Micro::QueenCastLoop(&queen2,{&marine1,&marine2,&marine3,&marine4,&marine5,&marine6}));
+    assert(queen2.command.tech==TechTypes::Ensnare && queen2.command.position.x>=240 && Micro::marked==2);
+    game.player.units.erase(&ling);
+    assert(CombatPolicy::EnsnareScore(3,0)==3 && CombatPolicy::EnsnareScore(4,1)==0 && CombatPolicy::EnsnareScore(5,1)==3);
+    assert(CombatPolicy::EnsnareScore(2,0)==0);
 
     std::vector<FakeUnit> hydras(25);
     Unitset units;

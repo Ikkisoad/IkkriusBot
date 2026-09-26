@@ -101,4 +101,33 @@ namespace CombatPolicy {
     inline bool HarassNeedsRegen(int hp, int maxHp, bool regenerating) {
         return regenerating ? hp * 10 < maxHp * 9 : hp * 5 < maxHp * 2;
     }
+
+    // Ensnare slows every unit under it, ours included: an allied unit caught in the
+    // cloud costs about two enemies' worth of value. Zero means "do not cast here".
+    constexpr int EnsnareRadius = 96;
+    inline int EnsnareScore(int enemies, int allies) {
+        const int score = enemies - allies * 2;
+        return enemies >= 3 && score >= 3 ? score : 0;
+    }
+
+    // Maxed out with a bank: minerals can no longer become units, so each mining base
+    // turns them into colonies. Returns the Sunken target per base (Spores follow it).
+    inline int SurplusColonies(int supplyUsed, int minerals) {
+        if (supplyUsed < 380 || minerals < 800) return 0;
+        return std::min(4, 1 + (minerals - 800) / 400);
+    }
+    inline int SurplusSpores(int colonies, bool enemyAir) {
+        if (colonies <= 0) return 0;
+        return enemyAir ? std::min(3, colonies) : 1;
+    }
+
+    // Guardians outrange every static defense, so once they are on the field the rest of
+    // the army leaves colonies/cannons/bunkers/turrets to them instead of trading into them.
+    inline bool GuardianSiegeActive(int guardians) { return guardians >= 1; }
+    // A Guardian group big enough to survive alone holds the enemy's next base between attacks.
+    inline bool GuardianContain(int guardians, bool baseThreatened) { return !baseThreatened && guardians >= 4; }
+    // While Guardians deny the opponent's expansions, keep taking more of our own.
+    inline bool ContainExpansion(int guardians, int miningSites, int drones) {
+        return guardians >= 4 && miningSites >= 2 && miningSites < 7 && drones >= miningSites * 10;
+    }
 }

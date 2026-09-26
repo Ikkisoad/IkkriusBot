@@ -367,6 +367,7 @@ void Adaptive::Execute() {
                 }
             }
         }
+        if (!emergency && Tools::BuildSurplusDefense(m_reserveMinerals)) m_decision = "surplus_defense";
     }
     ManageAttack(counts, emergency);
 
@@ -518,11 +519,15 @@ void Adaptive::Economy(const Counts& counts, bool emergency) {
     // Every patch already has two miners: the spare drones go and take a new base.
     const bool saturated = mining.mineralSlots > 0 && counts.miningSites < 8 && !RushPending() &&
         mining.mineralWorkers + mining.idleWorkers >= mining.mineralSlots && mining.idleWorkers > 0;
-    if (natural || later || surplus || saturated) {
+    // Guardians holding the enemy's next base are the moment to take more of our own.
+    const bool contain = CombatPolicy::ContainExpansion(Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Guardian),
+        counts.miningSites, counts.drones);
+    if (natural || later || surplus || saturated || contain) {
         const auto expansion = BasesTools::GetNextExpansionPosition();
         if (expansion.isValid()) {
             m_reserveMinerals = std::max(m_reserveMinerals, 300);
-            m_decision = surplus ? "surplus_expand" : saturated ? "saturated_expand" : "expand";
+            m_decision = surplus ? "surplus_expand" : saturated ? "saturated_expand" :
+                contain && !natural && !later ? "contain_expand" : "expand";
             Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, expansion);
             return;
         }

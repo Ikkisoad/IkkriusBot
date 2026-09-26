@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream> // Include necessary header for stringstream
 #include "micro.h"
+#include "CombatPolicy.h"
 
 BWAPI::Unit Tools::GetClosestUnitTo(BWAPI::Position p, const BWAPI::Unitset& units)
 {
@@ -300,7 +301,7 @@ bool Tools::EnsureBaseGas(BWAPI::Unit depot) {
 }
 
 bool Tools::EnsureGroundDefense(BWAPI::Unit depot, int target) {
-    return EnsureStaticDefense(depot, target, BWAPI::UnitTypes::Zerg_Sunken_Colony);
+    return EnsureBaseDefense(depot, target, 0);
 }
 
 bool Tools::EnsureStaticDefense(BWAPI::Unit depot, int target, BWAPI::UnitType finalType) {
@@ -322,6 +323,59 @@ bool Tools::EnsureStaticDefense(BWAPI::Unit depot, int target, BWAPI::UnitType f
     const bool accepted = BuildBuildingOptimal(BWAPI::UnitTypes::Zerg_Creep_Colony, depot->getTilePosition());
     MatchLog::Command("base_defense", "Zerg Creep Colony", accepted);
     return accepted;
+}
+
+
+// Keep the requested Sunken and Spore Colonies around a depot, placing one Creep Colony at a time.
+bool Tools::EnsureBaseDefense(BWAPI::Unit depot, int sunkens, int spores) {
+    if (!depot || !depot->isCompleted() || CountUnitOfType(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) return false;
+    if (CountUnitOfType(BWAPI::UnitTypes::Zerg_Evolution_Chamber) == 0) spores = 0;
+    int haveSunkens = 0, haveSpores = 0, creeps = 0;
+    BWAPI::Unit ready = nullptr;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit->getDistance(depot) > 256) continue;
+        if (unit->getType() == BWAPI::UnitTypes::Zerg_Creep_Colony) {
+            ++creeps;
+            if (unit->isCompleted() && !ready) ready = unit;
+        } else if (unit->getType() == BWAPI::UnitTypes::Zerg_Sunken_Colony) ++haveSunkens;
+        else if (unit->getType() == BWAPI::UnitTypes::Zerg_Spore_Colony) ++haveSpores;
+    }
+    if (ready) return MorphUnit(ready, haveSpores < spores ? BWAPI::UnitTypes::Zerg_Spore_Colony : BWAPI::UnitTypes::Zerg_Sunken_Colony);
+    const int missing = std::max(0, sunkens - haveSunkens) + std::max(0, spores - haveSpores);
+    if (creeps >= missing || IsQueued(BWAPI::UnitTypes::Zerg_Creep_Colony).isValid() ||
+        BWAPI::Broodwar->self()->minerals() < 125) return false;
+    const bool accepted = BuildBuildingOptimal(BWAPI::UnitTypes::Zerg_Creep_Colony, depot->getTilePosition());
+    MatchLog::Command("base_defense", "Zerg Creep Colony", accepted);
+    return accepted;
+}
+
+// Maxed out and banking: spend the minerals that can no longer become units on colonies at every mining base.
+bool Tools::BuildSurplusDefense(int reserveMinerals) {
+    const auto self = BWAPI::Broodwar->self();
+    const int colonies = CombatPolicy::SurplusColonies(self->supplyUsed(), self->minerals() - reserveMinerals);
+    if (colonies == 0 || CountUnitOfType(BWAPI::UnitTypes::Zerg_Spawning_Pool) == 0) return false;
+    const auto units = self->getUnits();
+    if (CountUnitsOfType(BWAPI::UnitTypes::Zerg_Evolution_Chamber, units, true) == 0)
+        TryBuildBuilding(BWAPI::UnitTypes::Zerg_Evolution_Chamber, 1, self->getStartLocation());
+    bool enemyAir = false;
+    for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
+        if (enemy->exists() && enemy->isVisible() && self->isEnemy(enemy->getPlayer()) && enemy->isFlying() &&
+            !enemy->getType().isBuilding() && (enemy->getType().canAttack() || enemy->getType() == BWAPI::UnitTypes::Protoss_Carrier)) {
+            enemyAir = true;
+            break;
+        }
+    }
+    const int spores = CombatPolicy::SurplusSpores(colonies, enemyAir);
+    bool acted = false;
+    for (auto depot : units) {
+        if (!depot->getType().isResourceDepot() || !depot->isCompleted()) continue;
+        bool mining = false;
+        for (auto mineral : BWAPI::Broodwar->getMinerals())
+            mining = mining || (mineral->getResources() > 0 && mineral->getDistance(depot) < 320);
+        if (mining && EnsureBaseDefense(depot, colonies, spores)) acted = true;
+    }
+    if (acted) MatchLog::Event("surplus_defense", "colonies=" + std::to_string(colonies) + " spores=" + std::to_string(spores));
+    return acted;
 }
 
 void Tools::BalanceMineralWorkers() {

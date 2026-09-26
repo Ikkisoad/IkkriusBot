@@ -158,6 +158,9 @@ MIT — see [`LICENSE`](LICENSE).
 The ground HiveTech strategy fields Hydras before Lair, researches Lurkers after
 establishing its ranged army, and delays Hive until the economy can support it.
 It adds gas at developed bases, Sunken defenses, Hydra range/speed and ground upgrades.
+Once maxed (190+ supply) with 800+ spare minerals, both HiveTech and Adaptive spend the
+bank on Sunken and Spore Colonies at every mining base (an Evolution Chamber is added for
+Spores, more Spores when enemy air is seen), logged as `surplus_defense`.
 The army attacks once formed, returns to defend threatened bases, and regroups after
 heavy losses. Match results are still needed to tune these heuristics.
 
@@ -223,7 +226,10 @@ HiveTech groups nearby Hydras into squads of up to 12 and requests one Queen per
 It replaces lost Queens and holds supply for missing support. A detached Hydra group
 also requests its own Queen. Queens catch up behind their assigned groups and cast
 Ensnare on clusters of at least three unensnared combat units, or Spawn Broodlings on
-valuable valid ground targets. Nearby Queens avoid duplicate casts. Parasite uses only
+valuable valid ground targets. Ensnare counts each of our own attackers under the cloud
+as two enemies, so a Queen aims at the part of a clump clear of our units or holds the
+cast; our units still inside the impact area step out while the spell is in flight.
+Nearby Queens avoid duplicate casts. Parasite uses only
 surplus energy. Support is a production target: groups can temporarily lack a Queen
 while rebuilding losses or waiting for tech/resources.
 
@@ -237,6 +243,18 @@ either keep trading or disengage entirely.
   anything that can shoot air, and spend each weapon cooldown stepping out of the reach
   of enemy anti-air they outrange. If an enemy matches their range (e.g. Goliaths with
   Charon Boosters, Carriers, mobile air), they fall back to the Devourer/Mutalisk escort.
+  Static defense and starting depots rank with the enemy army, ahead of workers. While
+  reloading or approaching, they prefer a max-range perch over unwalkable terrain or above
+  the target's cliff level (and outside every known anti-air reach), so ground anti-air
+  must path around before it can answer.
+- **Guardian containment**: with no target in reach, Guardians siege the enemy's
+  expansions first. Between attacks a group of four or more holds the free base closest to
+  the enemy main (with its Devourer escort), killing new bases as they start, and while it
+  does the strategies keep expanding (`contain_expand`) up to seven mining sites.
+- **Leave static defense to Guardians**: while any Guardian is alive, the rest of the army
+  ignores targets under enemy colonies/cannons/bunkers/turrets, steps out of their range
+  and advances behind the Guardian group instead of toward the enemy main. Static defense
+  attacking our own bases is still fought normally.
 - **Mutalisk raids**: while the main army is not attacking, a squad of 3–6 Mutalisks
   raids enemy mineral lines. Raiders prioritize workers, skip targets covered by static
   anti-air, travel as a flock, and send damaged members home to regenerate. The squad

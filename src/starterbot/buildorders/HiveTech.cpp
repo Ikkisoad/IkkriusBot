@@ -124,6 +124,7 @@ void HiveTech::Execute() {
                 Tools::EnsureGroundDefense(depot, localThreat ? 2 : 1);
         }
     }
+    if (!emergency && Tools::BuildSurplusDefense(m_reserveMinerals)) decision = "surplus_defense";
 
     if (!emergency && currentPhase != Phase::SafeOpener) {
         const int targetDrones = std::min(54, miningSites * 16);
@@ -134,14 +135,16 @@ void HiveTech::Execute() {
         const auto reserved = Tools::GetConstructionReserve();
         const bool surplus = CombatPolicy::SurplusExpansion(BWAPI::Broodwar->self()->minerals() -
             std::max(m_reserveMinerals, reserved.first), drones, armySupply);
-        if (threats.empty() && ((miningSites < 4 && drones >= miningSites * 14 && armySupply >= 32) || surplus) &&
+        // Guardians holding the enemy's next base are the moment to take more of our own.
+        const bool contain = CombatPolicy::ContainExpansion(Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Guardian), miningSites, drones);
+        if (threats.empty() && ((miningSites < 4 && drones >= miningSites * 14 && armySupply >= 32) || surplus || contain) &&
             !Tools::IsQueued(BWAPI::UnitTypes::Zerg_Hatchery).isValid()) {
             const auto expansion = BasesTools::GetNextExpansionPosition();
             if (expansion.isValid()) {
                 m_reserveMinerals = std::max(m_reserveMinerals, 300);
                 if (Tools::TryBuildBuilding(BWAPI::UnitTypes::Zerg_Hatchery, 1, expansion) && surplus)
                     MatchLog::Event("surplus_expansion", "mining_sites=" + std::to_string(miningSites));
-                decision = surplus ? "surplus_expand" : "expand";
+                decision = surplus ? "surplus_expand" : contain ? "contain_expand" : "expand";
             }
         }
         if (bases >= 3 && bases < 7 && BWAPI::Broodwar->self()->minerals() >= 600 &&

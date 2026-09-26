@@ -54,6 +54,13 @@ namespace Micro
     // Small-flock worker raid; `retreat` sends the raider home to regenerate or disengage.
     void MutaliskRaidLoop(BWAPI::Unit muta, BWAPI::Position raidTarget, BWAPI::Position squadCenter, BWAPI::Position home, bool retreat);
     // Siege from max range; spend weapon cooldown outside enemy anti-air reach.
-    void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies, BWAPI::Position fallback = BWAPI::Positions::None);
+    // With no target in reach, `siegeTarget` (an expansion to deny or a base to contain) replaces the enemy main.
+    void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies, BWAPI::Position fallback = BWAPI::Positions::None,
+                             BWAPI::Position siegeTarget = BWAPI::Positions::None);
     bool QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies);
+    // Friendly spell areas (Ensnare) that our own units step out of until the spell lands.
+    void MarkSpellArea(BWAPI::Position center, int radius);
+    bool DodgeFriendlySpell(BWAPI::Unit unit);
+    // While Guardians are on the field, targets under enemy static defense are left to them.
+    bool AvoidsStaticDefense(BWAPI::Unit unit, BWAPI::Unit enemy);
 }

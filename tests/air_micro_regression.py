@@ -37,13 +37,14 @@ struct Position {
 };
 namespace Positions { const Position None{-999,-999}; }
 struct TilePosition { Position position; explicit TilePosition(Position p) : position(p) {} };
+struct WalkPosition { Position position; explicit WalkPosition(Position p) : position(p) {} };
 struct WeaponType {
     int id=0, range=0;
     bool operator==(WeaponType other) const { return id==other.id; }
     bool operator!=(WeaponType other) const { return id!=other.id; }
 };
 namespace WeaponTypes { const WeaponType None{0,0}, Gauss_Rifle{1,128}, Glave_Wurm{2,96}, Acid_Spore{3,256},
-    Halo_Rockets{4,192}, Long_Missiles{5,160}, Suicide{6,0}; }
+    Halo_Rockets{4,192}, Long_Missiles{5,160}, Suicide{6,0}, Subterranean_Spines{7,224}; }
 struct UnitType {
     int id=0, supply=2, hp=100;
     bool building=false, worker=false, depot=false;
@@ -67,7 +68,9 @@ const UnitType Terran_Bunker{1,0,350,true}, Protoss_Carrier{2,12,300},
     Terran_Missile_Turret{7,0,200,true,false,false,WeaponTypes::None,WeaponTypes::Long_Missiles},
     Terran_Goliath{8,4,125,false,false,false,WeaponTypes::None,WeaponTypes::Halo_Rockets},
     Zerg_Scourge{9,1,25,false,false,false,WeaponTypes::None,WeaponTypes::Suicide},
-    Terran_Command_Center{10,0,1500,true,false,true};
+    Terran_Command_Center{10,0,1500,true,false,true},
+    Zerg_Sunken_Colony{11,0,300,true,false,false,WeaponTypes::Subterranean_Spines},
+    Zerg_Hydralisk{12,2,80,false,false,false,WeaponTypes::Gauss_Rifle,WeaponTypes::Gauss_Rifle};
 }
 namespace Filter { const int IsEnemy=1; }
 struct FakeUnit;
@@ -77,6 +80,7 @@ struct Player {
     bool hostile=false; int airBonus=0;
     bool isEnemy(Player* other) { return other && other->hostile; }
     int weaponMaxRange(WeaponType weapon) { return weapon.range + (weapon==WeaponTypes::Halo_Rockets ? airBonus : 0); }
+    std::set<struct FakeUnit*> getUnits();
 };
 std::vector<Unit> world;
 struct FakeUnit {
@@ -88,7 +92,7 @@ struct FakeUnit {
     Position getPosition() { return position; }
     int getID() { return id; }
     bool exists() { return alive; } bool isVisible() { return visible; } bool isCompleted() { return complete; }
-    bool isDetected() { return detected; } bool isFlying() { return flying; }
+    bool isDetected() { return detected; } bool isFlying() { return flying; } bool isBurrowed() { return false; }
     int getHitPoints() { return hp<0 ? type.hp : hp; } int getShields() { return 0; }
     int getAirWeaponCooldown() { return airCooldown; } int getGroundWeaponCooldown() { return groundCooldown; }
     int getDistance(Unit other) { return position.getApproxDistance(other->position); }
@@ -100,8 +104,14 @@ struct FakeUnit {
         return result;
     }
 };
+Unitset Player::getUnits() { Unitset result; for (auto u : world) if (u->alive && u->player==this) result.insert(u); return result; }
 struct Game {
     Player player; int frame=100;
+    std::vector<std::pair<Position,int>> unwalkable; // Circles over cliffs/water.
+    int cliffX=100000; // Tiles at or beyond this x are high ground.
+    bool isWalkable(WalkPosition w) { for (auto& c : unwalkable) if (w.position.getApproxDistance(c.first)<=c.second) return false; return true; }
+    int getGroundHeight(TilePosition t) { return t.position.x>=cliffX ? 2 : 0; }
+    int getLatencyFrames() { return 3; }
     Player* self() { return &player; }
     int getFrameCount() { return frame; }
     void drawTextMap(Position, const char*) {}
@@ -122,6 +132,8 @@ namespace BasesTools {
 BWAPI::Position enemyMain{3000,3000};
 BWAPI::Position GetEnemyBasePosition() { return enemyMain; }
 BWAPI::Position GetMainBasePosition() { return {100,100}; }
+std::vector<BWAPI::Position> bases;
+const std::vector<BWAPI::Position>& GetAllBasePositions() { return bases; }
 }
 namespace Micro {
 enum class MicroMode { Neutral, Aggressive, Defensive };
@@ -134,18 +146,28 @@ void SmartAttackUnit(BWAPI::Unit, BWAPI::Unit target) { attacked=target; }
 void SmartMove(BWAPI::Unit, BWAPI::Position position) { moved=position; }
 void ScoutAndWander(BWAPI::Unit) {}
 void MutaliskRaidLoop(BWAPI::Unit, BWAPI::Position, BWAPI::Position, BWAPI::Position, bool);
-void GuardianAssaultLoop(BWAPI::Unit, BWAPI::Unitset, BWAPI::Position);
+void GuardianAssaultLoop(BWAPI::Unit, BWAPI::Unitset, BWAPI::Position, BWAPI::Position=BWAPI::Positions::None);
 void ResetCombatState();
+bool AvoidsStaticDefense(BWAPI::Unit, BWAPI::Unit);
+void MarkSpellArea(BWAPI::Position, int);
+bool DodgeFriendlySpell(BWAPI::Unit);
 }
-namespace {
+using Micro::SmartMove;
 """
+source+=text[text.index('namespace {\n    // Enemy static defense'):text.index('void Micro::SmartAttackMove')]
+source+='namespace {\n'
+
 for signature in ('BWAPI::Position UnitCenter(', 'int AirThreatRange(', 'bool IsStaticAntiAir(',
-                  'int ThreatMargin(', 'BWAPI::Position AwayFrom('):
+                  'int ThreatMargin(', 'BWAPI::Position AwayFrom(', 'int StaticReach(', 'int TerrainAdvantage(',
+                  'BWAPI::Position GuardianPerch('):
     source+=function(signature)+'\n'
+source+=between('// Our own units step out of an area', '// Mutalisk raid squad, kept stable across frames.')
 source+=between('// Mutalisk raid squad, kept stable across frames.', 'bool HarassAvoided(')
-for signature in ('bool HarassAvoided(', 'void EndRaid(', 'RaidOrders UpdateRaidSquad('):
+for signature in ('bool HarassAvoided(', 'void EndRaid(', 'RaidOrders UpdateRaidSquad(', 'BWAPI::Position ChooseGuardianSiege(',
+                  'void UpdateStaticCover(', 'bool KeepOutOfStaticDefense('):
     source+=function(signature)+'\n'
 source+='}\n'
+source+=function('void Micro::MarkSpellArea')+'\n'+function('bool Micro::DodgeFriendlySpell')+'\n'
 source+='std::map<int,int> lurkerLastContact;\n'+function('void Micro::ResetCombatState')+'\n'
 source+=function('void Micro::MutaliskRaidLoop')+'\n'
 source+=function('void Micro::GuardianAssaultLoop')+'\n'
@@ -230,7 +252,72 @@ int main() {
     for (auto m : flock) if (regenerating++<2) harassRegen.insert(m->getID());
     orders=UpdateRaidSquad(flock,{},{100,100});
     assert(orders.raiders.size()==4 && orders.retreat); // Two healthy raiders do not go in alone.
-    std::cout << "Air micro regressions passed.\n";
+    for (auto m : flock) m->alive=false;
+    ResetCombatState();
+
+    // Guardian terrain: reload over unwalkable ground at max range instead of just backing off.
+    auto perched=make(UnitTypes::Zerg_Guardian,&self,1000,3000); perched->flying=true; perched->groundCooldown=20;
+    auto shooter=make(UnitTypes::Terran_Marine,&enemy,1150,3000);
+    game.unwalkable.push_back({{1150,2760},64});
+    Micro::Reset(); Micro::GuardianAssaultLoop(perched,{}, {500,3000}, Positions::None);
+    assert(Micro::moved.isValid() && Micro::moved.getApproxDistance({1150,2760})<=32);
+    assert(TerrainAdvantage({1150,2760},{1150,3000})==2 && TerrainAdvantage({1000,3000},{1150,3000})==0);
+    game.cliffX=1200;
+    assert(TerrainAdvantage({1300,3000},{1150,3000})==1); // High ground over the target's level.
+    game.unwalkable.clear(); game.cliffX=100000;
+    // Colonies are siege targets ahead of workers.
+    perched->groundCooldown=0; shooter->alive=false;
+    auto drone=make(UnitTypes::Terran_SCV,&enemy,1100,3000);
+    auto sunken=make(UnitTypes::Zerg_Sunken_Colony,&enemy,1200,3000);
+    Micro::Reset(); Micro::GuardianAssaultLoop(perched,{}, {500,3000}, Positions::None);
+    assert(Micro::attacked==sunken);
+    drone->alive=false; sunken->alive=false;
+    // Nothing in reach: go deny the chosen base instead of the enemy main.
+    Micro::Reset(); Micro::GuardianAssaultLoop(perched,{}, {500,3000}, Position(2500,500));
+    assert(Micro::moved==Position(2500,500));
+    perched->alive=false;
+
+    // Siege choice: kill expansions first, otherwise contain the free base nearest their main.
+    BasesTools::bases={{3000,3000},{2600,2900},{1000,1000}};
+    make(UnitTypes::Terran_Command_Center,&self,1000,1000);
+    enemyDepots[1]={3000,3000};
+    assert(ChooseGuardianSiege({1000,1000},false)==Position(2600,2900));
+    assert(ChooseGuardianSiege({1000,1000},true)==BasesTools::enemyMain);
+    enemyDepots[2]={2400,2400};
+    assert(ChooseGuardianSiege({1000,1000},true)==Position(2400,2400));
+    ResetCombatState();
+
+    // With Guardians out, the army stays out of colony range and leaves covered targets alone.
+    auto colony=make(UnitTypes::Zerg_Sunken_Colony,&enemy,500,2000);
+    auto guard=make(UnitTypes::Terran_Marine,&enemy,560,2000);
+    auto hydra=make(UnitTypes::Zerg_Hydralisk,&self,700,2000);
+    UpdateStaticCover(true,{});
+    assert(Micro::AvoidsStaticDefense(hydra,guard) && Micro::AvoidsStaticDefense(hydra,colony));
+    Micro::Reset(); assert(KeepOutOfStaticDefense(hydra,{900,2000}) && Micro::moved.x>700);
+    hydra->position={1100,2000};
+    assert(!KeepOutOfStaticDefense(hydra,{900,2000}) && !Micro::AvoidsStaticDefense(hydra,make(UnitTypes::Terran_Marine,&enemy,1200,2000)));
+    UpdateStaticCover(true,{colony}); // A colony raiding our base is fought, not avoided.
+    assert(!Micro::AvoidsStaticDefense(hydra,guard));
+    UpdateStaticCover(false,{});
+    assert(!Micro::AvoidsStaticDefense(hydra,guard));
+
+    // Friendly Ensnare: units under the cloud step out until it lands.
+    hydra->position={120,100};
+    Micro::MarkSpellArea({100,100},96);
+    Micro::Reset(); assert(Micro::DodgeFriendlySpell(hydra) && Micro::moved.x>=100+96);
+    hydra->position={400,100};
+    assert(!Micro::DodgeFriendlySpell(hydra));
+    hydra->position={120,100}; game.frame+=40;
+    assert(!Micro::DodgeFriendlySpell(hydra)); // The spell has landed.
+
+    // Maxed with a bank: turn minerals into colonies, and Spores match enemy air.
+    assert(SurplusColonies(378,5000)==0 && SurplusColonies(390,799)==0);
+    assert(SurplusColonies(390,800)==1 && SurplusColonies(400,1600)==3 && SurplusColonies(400,9000)==4);
+    assert(SurplusSpores(0,true)==0 && SurplusSpores(3,false)==1 && SurplusSpores(4,true)==3);
+    assert(GuardianSiegeActive(1) && !GuardianSiegeActive(0));
+    assert(GuardianContain(4,false) && !GuardianContain(4,true) && !GuardianContain(3,false));
+    assert(ContainExpansion(4,3,30) && !ContainExpansion(3,3,30) && !ContainExpansion(4,3,29) && !ContainExpansion(4,7,90));
+    std::cout << "Air micro, Guardian siege and static-defense regressions passed.\n";
 }
 """
 

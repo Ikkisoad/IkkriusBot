@@ -79,7 +79,8 @@ struct FakeUnit {
     int getLastCommandFrame() { return lastFrame; }
     Command getLastCommand() { return command; }
     bool burrow() { ++burrows; return true; } bool unburrow() { ++unburrows; return true; }
-    void attack(Position) { ++attacks; }
+    Position attackedAt;
+    void attack(Position position) { ++attacks; attackedAt=position; }
 };
 struct Game {
     Player player; int frame=100;
@@ -107,10 +108,13 @@ BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit,const BWAPI::Unitset& candidates,
     return best;
 }
 BWAPI::Unit fellBackFrom=nullptr;
+std::vector<BWAPI::Unit> covered; // Enemies sitting under static defense left to Guardians.
+bool AvoidsStaticDefense(BWAPI::Unit,BWAPI::Unit enemy) { return std::find(covered.begin(),covered.end(),enemy)!=covered.end(); }
 void FallBack(BWAPI::Unit,BWAPI::Unit threat,BWAPI::Position) { fellBackFrom=threat; }
 void GroundArmyLoop(BWAPI::Unit,const BWAPI::Unitset&,BWAPI::Position,BWAPI::Position);
 }
 """
+source+='BWAPI::Position siegeEscort{-999};\n'
 source+=function('void Micro::SmartAttackMove')
 source+=function('void Micro::LurkerSupportLoop')
 source+=function('void Micro::GroundArmyLoop')
@@ -198,6 +202,11 @@ int main() {
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::attacked==&zealot);
     game.frame=100;
+    // With Guardians available, targets under static defense are left to them and the army follows the siege.
+    Micro::covered={&zealot}; Micro::attacked=nullptr; siegeEscort={700}; hydra.idle=true; game.frame+=1;
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::attacked==nullptr && hydra.attackedAt.x==700);
+    Micro::covered.clear(); siegeEscort={-999};
     std::cout << "Ground combat and Lurker regressions passed.\n";
 }
 """
