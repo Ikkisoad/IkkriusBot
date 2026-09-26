@@ -100,7 +100,9 @@ All concrete build orders use the **singleton pattern** (`static Instance()` met
 
 Simple static factory. Maps `BuildOrderType` enum values to their singleton instances.
 
-Available types: `FourPool`, `FivePool`, `SixPool`, `SevenPool`, `EightPool`, `Genetic`, `Overpool`.
+Available types: `FourPool`, `FivePool`, `SixPool`, `SevenPool`, `EightPool`, `Genetic`, `Overpool`, `HiveTech`, `MutaHive`, `Adaptive` (default).
+
+`Adaptive` depends on the BWAPI-free `Learning` module ([`src/starterbot/learning/Learning.h`](../src/starterbot/learning/Learning.h)), which holds the composition specs, the timing genome and genetic algorithm, and the composition bandit.
 
 ### `Micro` namespace — [`src/starterbot/micro.h`](../src/starterbot/micro.h)
 
@@ -113,10 +115,13 @@ Provides unit-level micromanagement primitives:
 | `SmartKiteTarget` | Ranged unit kiting logic |
 | `SmartFleeUntilHealed` | Melee retreat when low HP |
 | `SmartScoutMove / ScoutAndWander` | Scout movement patterns |
-| `SmartAvoidLethalAndAttackNonLethal` | Threat prioritization |
+| `SmartAvoidLethalAndAttackNonLethal` | Group engagement: commit, hit-and-run or withdraw, then focus fire |
+| `AssessLocalFight` | Nearby friendly vs. enemy power and ally center (thresholds in `CombatPolicy::AssessEngagement`) |
+| `ChooseFocusTarget` | Shared target choice: threats first, then targets allies already hit, weakest, closest |
+| `FallBack` | Step away from a threat while drifting toward the group |
 | `GatherMinerals / GatherResources` | Worker assignment |
 | `unitAttack / attack` | Batch attack commands |
-| `BasicAttackAndScoutLoop` | Default frame-by-frame combat loop |
+| `BasicAttackAndScoutLoop` | Default frame-by-frame combat loop; leading units wait for the army |
 | `Retreat / Flee` | Fallback movement |
 
 ### `MapTools` — [`src/starterbot/MapTools.h`](../src/starterbot/MapTools.h)

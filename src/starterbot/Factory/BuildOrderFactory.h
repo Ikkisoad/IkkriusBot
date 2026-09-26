@@ -10,8 +10,9 @@
 #include "../buildorders/Overpool.h"
 #include "../buildorders/HiveTech.h"
 #include "../buildorders/MutaHive.h"
+#include "../buildorders/Adaptive.h"
 
-enum class BuildOrderType { FourPool, FivePool, SixPool, SevenPool, EightPool, Genetic, Overpool, HiveTech, MutaHive };
+enum class BuildOrderType { FourPool, FivePool, SixPool, SevenPool, EightPool, Genetic, Overpool, HiveTech, MutaHive, Adaptive };
 
 class BuildOrderFactory {
 public:
@@ -28,6 +29,7 @@ public:
             case BuildOrderType::Overpool: return &Overpool::Instance();
             case BuildOrderType::MutaHive: return &MutaHive::Instance();
             case BuildOrderType::HiveTech: return &HiveTech::Instance();
+            case BuildOrderType::Adaptive: return &Adaptive::Instance();
             default: return nullptr;
         }
     }

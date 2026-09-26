@@ -17,6 +17,7 @@ source=r"""
 #include <vector>
 #include <map>
 #include <string>
+#include "CombatPolicy.h"
 namespace BWAPI {
 struct Position {
     int x=0;
@@ -54,7 +55,7 @@ struct Command {
 struct Player { bool hostile=false; bool isEnemy(Player* other) { return other->hostile; } };
 struct FakeUnit;
 using Unit=FakeUnit*;
-using Unitset=std::vector<Unit>;
+struct Unitset : std::vector<Unit> { using std::vector<Unit>::vector; void insert(Unit unit) { push_back(unit); } };
 struct FakeUnit {
     UnitType type; Player* player=nullptr; int x=0;
     bool flying=false, detected=true, buried=false, idle=false;
@@ -100,6 +101,13 @@ void SmartAttackUnit(BWAPI::Unit,BWAPI::Unit enemy) { attacked=enemy; }
 void SmartMove(BWAPI::Unit,BWAPI::Position position) { moved=position; }
 void ScoutAndWander(BWAPI::Unit) {}
 void SmartAttackMove(BWAPI::Unit,BWAPI::Position);
+BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit,const BWAPI::Unitset& candidates,bool) {
+    BWAPI::Unit best=nullptr;
+    for(auto enemy:candidates) if(!best || unit->getDistance(enemy)<unit->getDistance(best)) best=enemy;
+    return best;
+}
+BWAPI::Unit fellBackFrom=nullptr;
+void FallBack(BWAPI::Unit,BWAPI::Unit threat,BWAPI::Position) { fellBackFrom=threat; }
 void GroundArmyLoop(BWAPI::Unit,const BWAPI::Unitset&,BWAPI::Position,BWAPI::Position);
 }
 """
@@ -144,10 +152,34 @@ int main() {
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==0);
     ling.idle=true;
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==1);
+    // Group engagement policy: commit to winnable fights, hit-and-run close ones, withdraw from losing ones.
+    using CombatPolicy::Engagement;
+    assert(CombatPolicy::AssessEngagement(12,10)==Engagement::Commit);
+    assert(CombatPolicy::AssessEngagement(10,12)==Engagement::HitAndRun);
+    assert(CombatPolicy::AssessEngagement(10,17)==Engagement::Withdraw);
+    assert(CombatPolicy::AssessEngagement(4,0)==Engagement::Commit);
+    assert(!CombatPolicy::ShouldStepBack(Engagement::Commit,true,10,100,100)); // Winning groups keep shooting.
+    assert(CombatPolicy::ShouldStepBack(Engagement::HitAndRun,true,10,100,100)); // Ranged units kite between shots.
+    assert(!CombatPolicy::ShouldStepBack(Engagement::HitAndRun,true,0,100,100)); // ...and return to fire when ready.
+    assert(!CombatPolicy::ShouldStepBack(Engagement::HitAndRun,false,10,100,100)); // Healthy melee stays in.
+    assert(CombatPolicy::ShouldStepBack(Engagement::HitAndRun,false,10,30,100)); // Hurt melee rotates out.
+    assert(CombatPolicy::ShouldStepBack(Engagement::Withdraw,false,0,100,100));
+    assert(CombatPolicy::FocusScore(0,200,128,1.0,2) < CombatPolicy::FocusScore(0,150,128,1.0,0)); // Join allies' target.
+    assert(CombatPolicy::FocusScore(0,100,128,0.3,0) < CombatPolicy::FocusScore(0,100,128,1.0,0)); // Finish weak units.
+    assert(CombatPolicy::FocusScore(0,128,128,1.0,0) < CombatPolicy::FocusScore(1,64,128,0.2,0)); // Threats before workers.
+    // A ranged unit in an even fight kites back between shots instead of standing still.
+    FakeUnit hydra{{6,1,false,false,true,{128}},&game.player,0}, zealot{{7,2},&enemy,100};
+    hydra.neighbors={&hydra,&zealot}; hydra.cooldown=10;
+    zealot.type.supply=3; // 2 vs 3 power: close enough to trade, not enough to commit.
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::fellBackFrom==&zealot);
+    hydra.cooldown=0; Micro::attacked=nullptr;
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::attacked==&zealot);
     std::cout << "Ground combat and Lurker regressions passed.\n";
 }
 """
 with tempfile.TemporaryDirectory(prefix='ikkrius-micro-') as temporary:
     directory=Path(temporary); (directory/'micro.cpp').write_text(source)
-    subprocess.run(['cl','/nologo','/EHsc','/std:c++20','micro.cpp','/Fe:micro.exe'],cwd=directory,check=True)
+    subprocess.run(['cl','/nologo','/EHsc','/std:c++20','/I'+str(ROOT/'src/starterbot'),'micro.cpp','/Fe:micro.exe'],cwd=directory,check=True)
     subprocess.run([str(directory/'micro.exe')],check=True)

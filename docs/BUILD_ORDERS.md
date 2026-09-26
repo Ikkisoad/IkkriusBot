@@ -71,9 +71,25 @@ Additional state tracked:
 **Micro:** Uses `Micro::BasicAttackAndScoutLoop()` — scouts and attacks with available units.
 
 > [!TIP]
-> This is the **currently active** strategy — `StarterBot::onStart()` hardcodes `BuildOrderType::Overpool`. Change the factory call there to switch strategies.
+> `StarterBot::onStart()` selects `BuildOrderType::Adaptive` by default. Change the factory call there to switch strategies.
 
 ---
+
+## Adaptive — [`src/starterbot/buildorders/Adaptive.h`](../src/starterbot/buildorders/Adaptive.h)
+
+**Default strategy.** Plays nine compositions: Zergling/Queen, Hydra/Queen, and Muta/Queen
+rushes; Guardian rush; mass Muta + Devourer; Ling/Muta/Queen; Ling/Muta/Guardian;
+Lurker/Queen/Muta; and Ling/Queen/Ultralisk. It switches between them mid-match based on
+scouted enemy tech. Each composition is a `CompositionSpec` in
+[`learning/Learning.cpp`](../src/starterbot/learning/Learning.cpp): army supply shares,
+a rush flag, and whether Queens are needed. The tech path is derived from these, and
+larva goes to the unit furthest below its share. Guardians and Devourers are morphed
+from Mutalisks, and Lurkers from Hydralisks.
+
+Step timings come from a genome evolved by a genetic algorithm. Composition choice comes
+from a contextual bandit trained on match rewards. See the README section
+*Adaptive compositions and learning* for the genes, learning loop, and controls. The
+learning core has no BWAPI dependency and is covered by `tests/learning_regression.py`.
 
 ## Genetic — [`src/starterbot/buildorders/Genetic.h`](../src/starterbot/buildorders/Genetic.h)
 

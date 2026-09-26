@@ -16,6 +16,27 @@ namespace CombatPolicy {
         return true;
     }
 
+    // Local fight evaluation: units commit together when the nearby group wins the trade,
+    // hit-and-run when it is close, and only withdraw when clearly outmatched.
+    enum class Engagement { Commit, HitAndRun, Withdraw };
+    inline Engagement AssessEngagement(double friendlyPower, double enemyPower) {
+        if (enemyPower <= 0 || friendlyPower >= enemyPower * 1.2) return Engagement::Commit;
+        if (enemyPower > friendlyPower * 1.6) return Engagement::Withdraw;
+        return Engagement::HitAndRun;
+    }
+    // Step back only between shots or when badly hurt, so the group keeps its damage on target.
+    inline bool ShouldStepBack(Engagement engagement, bool ranged, int cooldown, int hitPoints, int maxHitPoints) {
+        if (engagement == Engagement::Withdraw) return true;
+        if (cooldown <= 0) return false;
+        if (hitPoints * 4 < maxHitPoints) return true;
+        return engagement == Engagement::HitAndRun && (ranged || hitPoints * 5 < maxHitPoints * 2);
+    }
+    // Lower is better: threats first, then the target allies already shoot, then the weakest and closest.
+    inline double FocusScore(int tier, int distance, int reach, double hpFraction, int alliesOnTarget) {
+        const int chase = std::max(0, distance - reach);
+        return tier * 400.0 + chase * 2.0 + hpFraction * 120.0 - std::min(alliesOnTarget, 4) * 60.0;
+    }
+
     constexpr int HydrasPerGroup = 12;
     inline int QueenTarget(int hydraGroups, int airCombatUnits) {
         return hydraGroups + (airCombatUnits > 0 ? (airCombatUnits + 15) / 16 : 0);

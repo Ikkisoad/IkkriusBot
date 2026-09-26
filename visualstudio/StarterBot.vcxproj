@@ -54,6 +54,8 @@
     <ClInclude Include="..\src\starterbot\MatchLog.h" />
     <ClInclude Include="..\src\starterbot\CombatPolicy.h" />
     <ClInclude Include="..\src\starterbot\buildorders\MutaHive.h" />
+    <ClInclude Include="..\src\starterbot\buildorders\Adaptive.h" />
+    <ClInclude Include="..\src\starterbot\learning\Learning.h" />
     <ClInclude Include="BasesTools.h" />
     <ClInclude Include="src\starterbot\BuildOrder.h" />
   </ItemGroup>
@@ -90,6 +92,8 @@
     <ClCompile Include="..\src\starterbot\stats\stats.cpp" />
     <ClCompile Include="..\src\starterbot\Tools.cpp" />
     <ClCompile Include="..\src\starterbot\MatchLog.cpp" />
+    <ClCompile Include="..\src\starterbot\buildorders\Adaptive.cpp" />
+    <ClCompile Include="..\src\starterbot\learning\Learning.cpp" />
     <ClCompile Include="BasesTools.cpp" />
   </ItemGroup>
   <ItemGroup>

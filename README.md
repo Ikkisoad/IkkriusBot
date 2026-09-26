@@ -8,7 +8,8 @@ A **StarCraft: Brood War** Zerg AI bot built with [BWAPI 4.4.0](https://bwapi.gi
 
 ## Features
 
-- **Multiple build orders** — 4-Pool, 5-Pool, 6-Pool, 7-Pool, 8-Pool, Overpool, and Genetic (adaptive)
+- **Adaptive compositions** — nine Zerg army compositions that switch mid-match on scouted enemy tech, with step timings evolved by a genetic algorithm and composition choice learned by reinforcement
+- **Multiple build orders** — 4-Pool, 5-Pool, 6-Pool, 7-Pool, 8-Pool, Overpool, HiveTech, MutaHive, and Genetic
 - **Micromanagement system** — Aggressive, Defensive, and Neutral modes with smart attack, kite, flee, and scouting routines
 - **Base tracking** — BWEM-powered map analysis, expansion finding, and enemy base detection
 - **Match statistics** — Win-rate logging per opponent × race × map × strategy, used to pick the best strategy next game
@@ -207,8 +208,8 @@ continue comparing the per-match logs across opponents and maps.
 
 ## Queen support and air strategy
 
-Normal matches now select **MutaHive 70%** of the time and **HiveTech 30%**.
-The strategies retain separate statistics keys. MutaHive takes the direct Lair/Spire
+MutaHive and HiveTech are available through `IKKRIUS_STRATEGY` (normal matches use
+[Adaptive](#adaptive-compositions-and-learning)). The strategies retain separate statistics keys. MutaHive takes the direct Lair/Spire
 path, prioritizes Mutalisks, adds Queens, then commits to Hive at eight Mutalisks and
 24 Drones on at least two Hatcheries. Greater Spire morphs produce Guardians for ground
 siege and Devourers for air cover. The morph policy preserves at least eight completed
@@ -235,10 +236,61 @@ $env:IKKRIUS_STRATEGY = 'MutaHive' # or 'HiveTech'
 .\bin\RunStarterBotAndStarcraft.bat
 ```
 
-Remove that environment variable to return to weighted selection. The log summary now
+Remove that environment variable to return to the Adaptive build. The log summary now
 includes accepted Queen spells, Hydra-group support, Lurker deployments and air morphs.
 The `queen-air-v4` revision identifies this behavior; prior ground-build wins do not
 validate the new air strategy.
+
+## Adaptive compositions and learning
+
+`Adaptive` is the default build. It can play nine compositions and switch between them
+during a match:
+
+| # | Composition | # | Composition |
+|---|-------------|---|-------------|
+| 1 | `ZerglingQueenRush` | 6 | `LingMutaQueen` |
+| 2 | `HydraQueenRush` | 7 | `LingMutaGuardian` |
+| 3 | `MutaQueenRush` | 8 | `LurkerQueenMuta` |
+| 4 | `GuardianRush` | 9 | `LingQueenUltra` |
+| 5 | `MassMutaDevourer` | | |
+
+The bot remembers every enemy unit it has seen. It turns them into a tech profile: air,
+anti-air, splash, air splash, heavy ground units, small units, static defense, capital
+ships, detection, and game phase. Every 10 seconds it re-scores the compositions. It
+switches only when another composition beats the current one by the learned margin and
+the learned cooldown has passed. Tech buildings already owned make a switch cheaper, so
+Ling/Muta/Queen tends to move to Ling/Muta/Guardian rather than start over. Tech and
+units already built are kept after a switch.
+
+Two learners decide when and what to build:
+
+- **Genetic algorithm (step timing).** A genome of 27 genes sets when each step
+  happens: pool/gas/expansion drone counts, Lair/Den/Spire/Queen's Nest/Hive/Greater
+  Spire/Ultralisk Cavern timings, the Lurker research trigger, the rush drone cap,
+  drone saturation, the army-to-drone ratio, Queen count, attack and retreat thresholds,
+  upgrade timing, switching margin and cooldown, and how much to trust the counter
+  table. Each enemy race has a population of 10 genomes. Each genome plays 2 matches.
+  The best 3 then survive, and the rest are rebuilt by tournament selection, uniform
+  crossover, and Gaussian mutation.
+- **Reinforcement learning (composition choice).** A contextual bandit stores a value
+  for each (race + enemy tech signature, composition) pair. At the end of a match, each
+  composition that was used receives the match reward, weighted by how long it was
+  active. The opening choice explores with UCB and a 10% random pick. Mid-match choices
+  use the learned values plus the hand-written counter table.
+
+The reward is mostly win or loss, adjusted by kill/loss score and survival time. Learning
+state is saved to `bin/learning/adaptive-<race>.txt`, which is gitignored. Delete that
+file to reset learning. Useful controls:
+
+```powershell
+$env:IKKRIUS_COMP = 'LingMutaGuardian' # lock a composition (name or 1-9)
+$env:IKKRIUS_LEARNING = '0'            # play the best known genome, no exploration or saving
+```
+
+In game, type `comp` to show the current plan, `comp <name|1-9>` to lock a composition,
+and `comp auto` to hand control back to the learners. The overlay shows the composition,
+the current step, the genome generation and index, and the number of switches. Match logs
+record `genome`, `composition`, and `learning` events.
 
 ### Surplus economy and pressure waves
 

@@ -34,6 +34,12 @@ namespace Micro
     void Retreat(BWAPI::Unit unit);
     void Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal);
     
+    // Group combat helpers
+    struct LocalFight { double friendlyPower = 0, enemyPower = 0; int allies = 0; BWAPI::Position allyCenter = BWAPI::Positions::None; };
+    LocalFight AssessLocalFight(BWAPI::Unit unit, int radius);
+    BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferWorkers);
+    void FallBack(BWAPI::Unit unit, BWAPI::Unit threat, BWAPI::Position anchor);
+
     void ResetCombatState();
     std::vector<BWAPI::Unitset> GetHydraGroups(const BWAPI::Unitset& units);
     void LurkerSupportLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);

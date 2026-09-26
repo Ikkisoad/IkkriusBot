@@ -34,10 +34,8 @@ void StarterBot::onStart()
             oponentRace = player->getRace().getName();
         }
     }
-    static std::mt19937 rng(std::random_device{}());
-    std::bernoulli_distribution preferAir(0.70);
-    auto selectedBuildOrder = preferAir(rng) ? BuildOrderType::MutaHive : BuildOrderType::HiveTech;
-    // An explicit override makes both builds reproducible for match diagnostics.
+    // Adaptive learns compositions and step timings itself; the fixed builds remain for diagnostics.
+    auto selectedBuildOrder = BuildOrderType::Adaptive;
     if (const char* requested = std::getenv("IKKRIUS_STRATEGY")) {
         if (std::string(requested) == "MutaHive") selectedBuildOrder = BuildOrderType::MutaHive;
         else if (std::string(requested) == "HiveTech") selectedBuildOrder = BuildOrderType::HiveTech;

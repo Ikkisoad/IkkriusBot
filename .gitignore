@@ -43,3 +43,6 @@ bin/logs/
 bin/updated/
 
 __pycache__/
+
+# Adaptive build order learning state (genomes + composition values)
+bin/learning/

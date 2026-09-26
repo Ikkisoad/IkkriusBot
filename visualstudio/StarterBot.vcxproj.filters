@@ -70,6 +70,8 @@
     </ClCompile>
     <ClCompile Include="..\src\starterbot\stats\stats.cpp" />
     <ClCompile Include="..\src\starterbot\buildorders\BuildOrderTools.cpp" />
+    <ClCompile Include="..\src\starterbot\buildorders\Adaptive.cpp"><Filter>BOs</Filter></ClCompile>
+    <ClCompile Include="..\src\starterbot\learning\Learning.cpp" />
     <ClCompile Include="..\src\starterbot\buildorders\Genetic.cpp">
       <Filter>BOs</Filter>
     </ClCompile>
@@ -85,6 +87,8 @@
     <ClInclude Include="..\src\starterbot\Tools.h" />
     <ClInclude Include="..\src\starterbot\CombatPolicy.h" />
     <ClInclude Include="..\src\starterbot\buildorders\MutaHive.h"><Filter>BOs</Filter></ClInclude>
+    <ClInclude Include="..\src\starterbot\buildorders\Adaptive.h"><Filter>BOs</Filter></ClInclude>
+    <ClInclude Include="..\src\starterbot\learning\Learning.h" />
     <ClInclude Include="BasesTools.h" />
     <ClInclude Include="src\starterbot\BuildOrder.h" />
     <ClInclude Include="..\src\starterbot\micro.h" />

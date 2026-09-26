@@ -284,7 +284,6 @@ void Micro::ScoutAndWander(BWAPI::Unit scout)
     }
 }
 
-// TODO Vicinity strength - test if there are enough ally units nearby to overwell the enemy
 // TODO Rabge safety - If a ranged unit kills us in two hits, don't enter its range
 // TODO Consider enemy lethal range as its range + 2 tiles
 void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoid)
@@ -327,7 +326,7 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
         return;
     }
 	bool cantFlee = false; // Flag to indicate if fleeing is possible
-    // --- Flee if any other lethal enemy is in range ---
+    // --- Find the closest lethal enemy in range ---
     BWAPI::Unit closestLethal = nullptr;
     int range = -1;
     int minLethalDist = std::numeric_limits<int>::max();
@@ -355,92 +354,34 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
         }
     }
 
+    // --- Group decision: fight together when the local battle is winnable, hit-and-run when close ---
+    const auto fight = AssessLocalFight(unit, 320);
+    const auto engagement = alwaysAvoid ? CombatPolicy::Engagement::Withdraw
+                                        : CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower);
     if (closestLethal && !cantFlee) {
-       /* if (!BasesTools::IsAreaEnemyBase(unit->getPosition(), 3)) {
-			Retreat(unit);
+        const bool ranged = unit->getType().groundWeapon().maxRange() > 32;
+        const int cooldown = unit->getGroundWeaponCooldown();
+        const int maxHp = unit->getType().maxHitPoints() + unit->getType().maxShields();
+        if (CombatPolicy::ShouldStepBack(engagement, ranged, cooldown, unit->getHitPoints() + unit->getShields(), maxHp)) {
+            // Fall back toward nearby allies; a lone unit heads home to meet reinforcements.
+            const auto anchor = fight.allies > 1 ? fight.allyCenter : BWAPI::Position(BasesTools::GetMainBasePosition());
+            FallBack(unit, closestLethal, anchor);
+            int x = unit->getPosition().x + 5;
+            int y = unit->getPosition().y + 5;
+            BWAPI::Broodwar->drawTextMap(BWAPI::Position(x, y), engagement == CombatPolicy::Engagement::Withdraw ? "Withdraw" : "Hit and run");
+            return;
         }
-        else {*/
-        Flee(unit, closestLethal);
-        //}
-        int x = unit->getPosition().x + 5;
-        int y = unit->getPosition().y + 5;
-        BWAPI::Broodwar->drawTextMap(BWAPI::Position(x, y), "Range %i", range);
-        return;
     }
 
-    // --- Target selection with priority system ---
-    BWAPI::Unit bestTarget = nullptr;
-    int bestPriority = 100;
-    int minDist = std::numeric_limits<int>::max();
-    bool bestTargetIsLethal = true; // Start with lethal as worst
-
-    // For building targeting
-    BWAPI::Unit lowestPercentHP = nullptr;
-    double lowestPercent = 1.1; // > 100%
-    int lowestPercentPriority = 3;
-    int lowestAbsHP = std::numeric_limits<int>::max();
-
-    for (auto enemy : enemies)
-    {
+    // --- Focus fire: the group converges on the same target ---
+    BWAPI::Unitset candidates;
+    for (auto enemy : enemies) {
         if (!enemy || !enemy->exists()) continue;
-        int maxTargetDistance = 32 * 50; // Only skip full-HP buildings farther than this
-
-        // Assign priority: 0 = offensive, 1 = worker, 2 = building, 3 = other
-        int priority = 4;
-        if (enemy->getType().canAttack() && !enemy->getType().isWorker() && !enemy->getType().isBuilding()) {
-            priority = 0;
-            maxTargetDistance = 8;
-        }
-        else if (enemy->getType().isWorker()) {
-            maxTargetDistance = 16;
-            priority = 1;
-        }
-        else if (enemy->getType().isBuilding() && enemy->isCompleted())
-            priority = 2;
-        else if (enemy->getType() == BWAPI::UnitTypes::Zerg_Larva || enemy->getType().isBuilding() && !enemy->isCompleted())
-            priority = 3;
-
-        BWAPI::WeaponType weapon = enemy->getType().groundWeapon();
-        if (unit->getType().isFlyer()) weapon = enemy->getType().airWeapon();
-        int damage = weapon.damageAmount();
-        int unitHP = unit->getHitPoints() + unit->getShields();
-        bool isLethal = (damage > 0 && damage * 2 >= unitHP) || alwaysAvoid;
-
-        int dist = unit->getDistance(enemy);
-
-        // Prefer non-lethal, then higher priority, then closer
-        if ((!isLethal && bestTargetIsLethal) ||
-            (isLethal == bestTargetIsLethal && priority < bestPriority) ||
-            (isLethal == bestTargetIsLethal && priority == bestPriority && dist < minDist))
-        {
-            bestTarget = enemy;
-            minDist = dist;
-            bestTargetIsLethal = isLethal;
-            
-            if (priority <= bestPriority) {
-                int hp = enemy->getHitPoints() + enemy->getShields();
-                int maxHp = enemy->getType().maxHitPoints() + enemy->getType().maxShields();
-                if (maxHp > 0) {
-                    double percent = static_cast<double>(hp) / maxHp;
-                    // Skip if is at 100% HP and too far away
-                    if (percent >= 1.0 && dist > maxTargetDistance) {
-                        if (percent < lowestPercent ||
-                            (percent == lowestPercent && hp < lowestAbsHP) || priority > bestPriority) {
-                            lowestPercent = percent;
-                            lowestAbsHP = hp;
-                            lowestPercentHP = enemy;
-                            lowestPercentPriority = priority;
-                        }
-                    }
-                }
-            }
-            bestPriority = priority;
-        }
+        // While trading at even odds, don't dive past threats to chase a far-away target.
+        if (engagement != CombatPolicy::Engagement::Commit && unit->getDistance(enemy) > 256) continue;
+        candidates.insert(enemy);
     }
-
-    // If the best target is a building, prefer the lowest percent HP building (break ties with lowest HP)
-    if (bestTarget && lowestPercentHP && lowestPercentPriority == bestPriority)
-        bestTarget = lowestPercentHP;
+    BWAPI::Unit bestTarget = ChooseFocusTarget(unit, candidates, false);
 
     if (!bestTarget) {
         // If the unit is stuck, attack the nearest enemy unit
@@ -457,7 +398,7 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
     }
 
     SmartAttackUnit(unit, bestTarget);
-    BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Attack best target");
+    BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Focus target");
 }
 
 // Send our idle workers to mine minerals so they don't just stand there
@@ -638,7 +579,7 @@ void Micro::unitAttack(BWAPI::Unit unit) {
             Micro::SmartAvoidLethalAndAttackNonLethal(unit, false);
         }
         else {
-            unit->attack(enemyBase);
+            SmartAttackMove(unit, enemyBase);
         }
     }
 }
@@ -665,7 +606,7 @@ void Micro::attack() {
                     //Units::AttackNearestNonLethalEnemyUnit(unit);
                     Micro::SmartAvoidLethalAndAttackNonLethal(unit, false);
                 } else {
-                    unit->attack(enemyBase);
+                    SmartAttackMove(unit, enemyBase);
                 }
             }
         }
@@ -674,6 +615,16 @@ void Micro::attack() {
 
 void Micro::BasicAttackAndScoutLoop(BWAPI::Unitset myUnits) {
     const auto threats = GetBaseThreats();
+    // Army center, so leading units wait for the rest instead of arriving one at a time.
+    int armyX = 0, armyY = 0, armySize = 0;
+    for (auto unit : myUnits) {
+        const auto type = unit->getType();
+        if (!unit->exists() || !unit->isCompleted() || unit->isMorphing() || unit->isBurrowed() || unit->isLoaded() ||
+            type.isWorker() || type.isBuilding() || !type.canAttack()) continue;
+        armyX += unit->getPosition().x; armyY += unit->getPosition().y; ++armySize;
+    }
+    const auto armyCenter = armySize > 0 ? BWAPI::Position(armyX / armySize, armyY / armySize) : BWAPI::Positions::None;
+    const auto enemyBase = BasesTools::GetEnemyBasePosition();
     for (auto& unit : myUnits) {
         if (unit->getType() == BWAPI::UnitTypes::Zerg_Overlord) {
             Micro::ScoutAndWander(unit);
@@ -694,6 +645,9 @@ void Micro::BasicAttackAndScoutLoop(BWAPI::Unitset myUnits) {
                 case static_cast<int>(MicroMode::Aggressive):
                     if (!enemies.empty()) {
                         Micro::SmartAvoidLethalAndAttackNonLethal(unit, false);
+                    } else if (armySize > 1 && enemyBase.isValid() && unit->getDistance(armyCenter) > 384 &&
+                               unit->getDistance(enemyBase) + 256 < armyCenter.getApproxDistance(enemyBase)) {
+                        Micro::SmartAttackMove(unit, armyCenter);
                     } else {
                         Micro::unitAttack(unit);
                     }
@@ -882,6 +836,101 @@ void Micro::Flee(BWAPI::Unit unit, BWAPI::Unit closestLethal) {
     BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Fleeing");
     return;
 }
+
+namespace {
+    double CombatPower(BWAPI::Unit unit) {
+        const auto type = unit->getType();
+        if (!type.canAttack() || type.isWorker()) return 0;
+        return std::max(2, type.supplyRequired()) *
+            double(unit->getHitPoints() + unit->getShields()) / std::max(1, type.maxHitPoints() + type.maxShields());
+    }
+}
+
+// Compare the strength of our units around this one against the enemies able to hurt it.
+Micro::LocalFight Micro::AssessLocalFight(BWAPI::Unit unit, int radius) {
+    LocalFight fight;
+    if (!unit) return fight;
+    int x = 0, y = 0;
+    auto nearbyUnits = unit->getUnitsInRadius(radius);
+    nearbyUnits.insert(unit);
+    for (auto nearby : nearbyUnits) {
+        const auto type = nearby->getType();
+        if (!nearby->exists() || !nearby->isCompleted()) continue;
+        const double power = CombatPower(nearby);
+        if (nearby->getPlayer() == BWAPI::Broodwar->self()) {
+            if (power <= 0) continue;
+            fight.friendlyPower += power;
+            x += nearby->getPosition().x; y += nearby->getPosition().y; ++fight.allies;
+        } else if (BWAPI::Broodwar->self()->isEnemy(nearby->getPlayer()) && nearby->isVisible()) {
+            const auto weapon = unit->isFlying() ? type.airWeapon() : type.groundWeapon();
+            if (weapon == BWAPI::WeaponTypes::None && type != BWAPI::UnitTypes::Terran_Bunker) continue;
+            fight.enemyPower += type.isBuilding() ? std::max(2.0, power) + 6 : power;
+        }
+    }
+    if (fight.allies > 0) fight.allyCenter = BWAPI::Position(x / fight.allies, y / fight.allies);
+    return fight;
+}
+
+// Pick a target the whole nearby group can agree on instead of each unit chasing its nearest enemy.
+BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferWorkers) {
+    if (!unit) return nullptr;
+    BWAPI::Unit best = nullptr;
+    double bestScore = std::numeric_limits<double>::max();
+    for (auto enemy : candidates) {
+        if (!enemy || !enemy->exists() || !enemy->isVisible() || !enemy->isDetected()) continue;
+        const auto ownWeapon = enemy->isFlying() ? unit->getType().airWeapon() : unit->getType().groundWeapon();
+        if (ownWeapon == BWAPI::WeaponTypes::None) continue;
+        const auto type = enemy->getType();
+        const auto enemyWeapon = unit->isFlying() ? type.airWeapon() : type.groundWeapon();
+        const bool armed = enemyWeapon != BWAPI::WeaponTypes::None || type == BWAPI::UnitTypes::Terran_Bunker;
+        int tier = 4;
+        if (armed && !type.isWorker()) tier = 0;
+        else if (type.isWorker()) tier = 1;
+        else if (!type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Larva && type != BWAPI::UnitTypes::Zerg_Egg) tier = 2;
+        else if (type.isBuilding() && enemy->isCompleted()) tier = 3;
+        if (preferWorkers && tier <= 1) tier = 1 - tier;
+        int allies = 0;
+        for (auto ally : enemy->getUnitsInRadius(320, BWAPI::Filter::IsOwned)) {
+            if (ally != unit && ally->getOrderTarget() == enemy) ++allies;
+        }
+        const int maxHp = std::max(1, type.maxHitPoints() + type.maxShields());
+        const double hpFraction = double(enemy->getHitPoints() + enemy->getShields()) / maxHp;
+        const double score = CombatPolicy::FocusScore(tier, unit->getDistance(enemy), ownWeapon.maxRange(), hpFraction, allies);
+        if (score < bestScore) { bestScore = score; best = enemy; }
+    }
+    return best;
+}
+
+// Back away from a threat while drifting toward the group, so retreating units regroup instead of scattering.
+void Micro::FallBack(BWAPI::Unit unit, BWAPI::Unit threat, BWAPI::Position anchor) {
+    if (!unit || !threat) return;
+    const auto position = unit->getPosition();
+    double awayX = position.x - threat->getPosition().x, awayY = position.y - threat->getPosition().y;
+    const double awayLength = std::sqrt(awayX * awayX + awayY * awayY);
+    if (awayLength > 0) { awayX /= awayLength; awayY /= awayLength; }
+    double dx = awayX, dy = awayY;
+    if (anchor.isValid() && unit->getDistance(anchor) > 64) {
+        const double ax = anchor.x - position.x, ay = anchor.y - position.y;
+        const double anchorLength = std::sqrt(ax * ax + ay * ay);
+        dx += ax / anchorLength; dy += ay / anchorLength;
+    }
+    double length = std::sqrt(dx * dx + dy * dy);
+    // Anchor straight through the threat: plain retreat beats running into it.
+    if (length < 0.3) { dx = awayX; dy = awayY; length = awayLength > 0 ? 1.0 : 0.0; }
+    if (length <= 0) { if (anchor.isValid()) SmartMove(unit, anchor); return; }
+    BWAPI::Position destination(position.x + int(96 * dx / length), position.y + int(96 * dy / length));
+    destination.makeValid();
+    const auto command = unit->getLastCommand();
+    if (command.getType() == BWAPI::UnitCommandTypes::Move && !unit->isIdle() &&
+        command.getTargetPosition().getApproxDistance(destination) < 48 &&
+        BWAPI::Broodwar->getFrameCount() - unit->getLastCommandFrame() < 8) return;
+    if (!unit->isFlying() && !BWAPI::Broodwar->isWalkable(BWAPI::WalkPosition(destination))) {
+        Flee(unit, threat);
+        return;
+    }
+    BWAPI::Broodwar->drawLineMap(position, destination, BWAPI::Colors::Orange);
+    SmartMove(unit, destination);
+}
 void Micro::SmartAttackMove(BWAPI::Unit unit, BWAPI::Position position) {
     if (!unit || !position.isValid() || unit->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return;
     const auto command = unit->getLastCommand();
@@ -902,6 +951,7 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
     }
     defending = target != nullptr;
     double friendlyPower = 0, enemyPower = 0;
+    BWAPI::Unitset candidates;
     for (auto nearby : unit->getUnitsInRadius(320)) {
         const auto type = nearby->getType();
         if (!nearby->exists() || !nearby->isCompleted()) continue;
@@ -912,12 +962,20 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
             if (type.groundWeapon() != BWAPI::WeaponTypes::None || type == BWAPI::UnitTypes::Terran_Bunker)
                 enemyPower += type.isBuilding() ? power + 6 : power;
             if (defending || !nearby->isDetected() || (nearby->isFlying() && unit->getType().airWeapon() == BWAPI::WeaponTypes::None)) continue;
-            if (!target || unit->getDistance(nearby) < unit->getDistance(target)) target = nearby;
+            candidates.insert(nearby);
         }
     }
-    if (!defending && (enemyPower > friendlyPower * 1.6 ||
-        (target && unit->getHitPoints() < unit->getType().maxHitPoints() / 4 && unit->getGroundWeaponCooldown() > 0))) {
+    // Focus fire with the nearby group rather than each unit taking its nearest enemy.
+    if (!defending) target = ChooseFocusTarget(unit, candidates, false);
+    const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower);
+    if (!defending && engagement == CombatPolicy::Engagement::Withdraw) {
         SmartMove(unit, rally);
+        return;
+    }
+    // Hit and run between shots, falling back toward the group rather than splitting off alone.
+    if (!defending && target && CombatPolicy::ShouldStepBack(engagement, unit->getType().groundWeapon().maxRange() > 32,
+        unit->getGroundWeaponCooldown(), unit->getHitPoints(), unit->getType().maxHitPoints())) {
+        FallBack(unit, target, center);
         return;
     }
     if (target) {
@@ -1032,7 +1090,8 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
         if (!type.isWorker() && !type.isBuilding() && type.canAttack()) combat.insert(unit);
     }
     const auto center = UnitCenter(combat, rally);
-    const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, rally);
+    // Without an air group, free Queens and Devourers follow the main army instead of idling at home.
+    const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, center);
     const auto groups = GetHydraGroups(myUnits);
     const bool queenNestReady = Tools::CountUnitOfType(BWAPI::UnitTypes::Zerg_Queens_Nest) > 0;
     std::map<int, BWAPI::Position> hydraCenters, queenEscorts;
@@ -1085,7 +1144,7 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
                 if (unit->getDistance(position) < distance) { escort = position; distance = unit->getDistance(position); }
             }
             LurkerSupportLoop(unit, threats, rally, escort);
-        } else if (type == BWAPI::UnitTypes::Zerg_Zergling) {
+        } else if (type == BWAPI::UnitTypes::Zerg_Zergling || type == BWAPI::UnitTypes::Zerg_Ultralisk) {
             GroundArmyLoop(unit, threats, rally, center);
         } else if (type == BWAPI::UnitTypes::Zerg_Queen) {
             if (QueenCastLoop(unit, BWAPI::Broodwar->getAllUnits())) continue;
@@ -1129,7 +1188,7 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
     // Find threats and targets
     auto nearbyEnemies = muta->getUnitsInRadius(range + 128, BWAPI::Filter::IsEnemy);
     
-    BWAPI::Unit bestTarget = nullptr;
+    BWAPI::Unitset candidates;
     BWAPI::Unit worstThreat = nullptr;
     int minThreatDist = 99999;
 
@@ -1144,20 +1203,19 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
                 worstThreat = enemy;
             }
         }
-
-        // Target priority (Workers > AntiAir > Buildings)
-        if (!bestTarget) {
-            bestTarget = enemy;
-        } else if (enemy->getType().isWorker() && !bestTarget->getType().isWorker()) {
-            bestTarget = enemy;
-        }
+        candidates.insert(enemy);
     }
 
+    // Workers first while harassing, but the whole flock converges on one target.
+    const auto fight = AssessLocalFight(muta, 288);
+    const auto engagement = CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower);
+    BWAPI::Unit bestTarget = ChooseFocusTarget(muta, candidates, engagement != CombatPolicy::Engagement::Commit);
+
     const int cooldown = bestTarget && bestTarget->isFlying() ? muta->getAirWeaponCooldown() : muta->getGroundWeaponCooldown();
-    if (worstThreat && cooldown > 0) {
-        // Kite away
+    if (worstThreat && (cooldown > 0 || engagement == CombatPolicy::Engagement::Withdraw)) {
+        // Kite back toward the flock so it stays stacked
         BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Kiting!");
-        Flee(muta, worstThreat);
+        FallBack(muta, worstThreat, fight.allies > 1 ? fight.allyCenter : BWAPI::Position(BasesTools::GetMainBasePosition()));
     } else if (bestTarget && cooldown == 0) {
         BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Attacking!");
         SmartAttackUnit(muta, bestTarget);
