@@ -938,6 +938,8 @@ void Micro::SmartAttackMove(BWAPI::Unit unit, BWAPI::Position position) {
     unit->attack(position);
 }
 
+namespace { BWAPI::Position ControlPoint(BWAPI::Unit unit, BWAPI::Position rally); }
+
 void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center) {
     const bool lurker = unit->getType() == BWAPI::UnitTypes::Zerg_Lurker;
     if (lurker) { LurkerSupportLoop(unit, threats, rally, center); return; }
@@ -984,7 +986,12 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
         else SmartAttackUnit(unit, target);
         return;
     }
-    if (GetMode() != MicroMode::Aggressive) { SmartAttackMove(unit, rally); return; }
+    // No orders to attack and nothing threatening a base: spread out for map control instead of
+    // clumping the whole army at the rally point. Attack-move still lets it fight anything it finds.
+    if (GetMode() != MicroMode::Aggressive) {
+        SmartAttackMove(unit, threats.empty() ? ControlPoint(unit, rally) : rally);
+        return;
+    }
     if (unit->getDistance(center) > 320) { SmartAttackMove(unit, center); return; }
     const auto enemyBase = siegeEscort.isValid() ? siegeEscort : BasesTools::GetEnemyBasePosition();
     if (enemyBase.isValid()) SmartAttackMove(unit, enemyBase);
@@ -1231,6 +1238,67 @@ namespace {
         Micro::SmartMove(unit, AwayFrom(unit, inReach, fallback));
         return true;
     }
+
+    // An idle unit still takes a free kill instead of just standing at its rally point: attack
+    // whatever is already in reach as long as the immediate local fight is not a losing one.
+    bool AttackIfSafelyInRange(BWAPI::Unit unit, int radius) {
+        BWAPI::Unit target = nullptr;
+        for (auto enemy : unit->getUnitsInRadius(radius, BWAPI::Filter::IsEnemy)) {
+            if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !unit->canAttack(enemy)) continue;
+            if (!target || unit->getDistance(enemy) < unit->getDistance(target)) target = enemy;
+        }
+        if (!target) return false;
+        const auto fight = Micro::AssessLocalFight(unit, 320);
+        if (CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower) == CombatPolicy::Engagement::Withdraw) return false;
+        Micro::SmartAttackUnit(unit, target);
+        return true;
+    }
+
+    // Idle offensive units spread across the map for control/vision instead of clumping at the
+    // rally point when nothing is attacking us. Assignment is stable per unit ID so a unit does
+    // not reshuffle to a different spot every frame.
+    BWAPI::Position ControlPoint(BWAPI::Unit unit, BWAPI::Position rally) {
+        const auto& bases = BasesTools::GetAllBasePositions();
+        if (bases.empty()) return rally;
+        std::vector<BWAPI::Position> spots;
+        for (const auto& base : bases) {
+            bool ours = false;
+            for (auto depot : BWAPI::Broodwar->self()->getUnits())
+                ours = ours || (depot->getType().isResourceDepot() && depot->getDistance(base) <= 320);
+            if (!ours) spots.push_back(base);
+        }
+        if (spots.empty()) return rally;
+        return spots[unit->getID() % spots.size()];
+    }
+
+    // Overlords spread one per base rather than stacking over the main, so a single AoE hit or
+    // detector sweep cannot wipe them all and every base keeps its own air detection.
+    BWAPI::Position OverlordSpread(BWAPI::Unit unit, BWAPI::Position rally) {
+        const auto& bases = BasesTools::GetAllOurBasePositions();
+        if (bases.empty()) return rally;
+        return bases[unit->getID() % bases.size()];
+    }
+
+    // Keep watching the enemy base instead of coming straight home once it is found: head for the
+    // nearest still-unexplored tile around it. Flee() above already pulls the scout out of danger.
+    void ScoutEnemyBuild(BWAPI::Unit scout, BWAPI::Position enemyBase) {
+        const auto orderPos = scout->getOrderTargetPosition();
+        if (!scout->isIdle() && orderPos != BWAPI::Positions::None && !BWAPI::Broodwar->isExplored(BWAPI::TilePosition(orderPos))) return;
+        constexpr int radius = 9; // tiles
+        const BWAPI::TilePosition center(enemyBase);
+        BWAPI::TilePosition best;
+        bool found = false;
+        int bestDist = std::numeric_limits<int>::max();
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                const BWAPI::TilePosition tile(center.x + dx, center.y + dy);
+                if (!tile.isValid() || BWAPI::Broodwar->isExplored(tile)) continue;
+                const int dist = scout->getDistance(BWAPI::Position(tile));
+                if (dist < bestDist) { bestDist = dist; best = tile; found = true; }
+            }
+        }
+        Micro::SmartMove(scout, BWAPI::Position(found ? best : center));
+    }
 }
 
 void Micro::MarkSpellArea(BWAPI::Position center, int radius) {
@@ -1340,7 +1408,24 @@ void Micro::DevourerEscortLoop(BWAPI::Unit unit, BWAPI::Position escort) {
     SmartMove(unit, escort);
 }
 
-void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave) {
+void Micro::ScourgeStrikeLoop(BWAPI::Unit scourge, BWAPI::Position escort) {
+    // One Scourge trades its own life for the target, so pick the highest-supply flyer in reach
+    // rather than whatever is nearest; ties go to the closer target to spend less time exposed.
+    BWAPI::Unit target = nullptr;
+    int bestValue = -1;
+    for (auto enemy : scourge->getUnitsInRadius(320, BWAPI::Filter::IsEnemy)) {
+        if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !enemy->isFlying() || !scourge->canAttack(enemy)) continue;
+        const int value = std::max(1, enemy->getType().supplyRequired());
+        if (value > bestValue || (value == bestValue && target && scourge->getDistance(enemy) < scourge->getDistance(target))) {
+            target = enemy;
+            bestValue = value;
+        }
+    }
+    if (target) { SmartAttackUnit(scourge, target); return; }
+    SmartMove(scourge, escort);
+}
+
+void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave, bool needsDetection) {
     const auto threats = GetBaseThreats();
     auto rally = BWAPI::Position(BasesTools::GetMainBasePosition());
     const auto enemyBase = BasesTools::GetEnemyBasePosition();
@@ -1454,18 +1539,42 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
             }
             if (danger) Flee(unit, danger);
             else if (unit == scout && !enemyBase.isValid()) ScoutAndWander(unit);
-            else SmartMove(unit, unit == scout && GetMode() == MicroMode::Aggressive ? center : rally);
+            else if (unit == scout && GetMode() != MicroMode::Aggressive) ScoutEnemyBuild(unit, enemyBase);
+            else if (unit == scout) SmartMove(unit, center);
+            else {
+                const auto spread = OverlordSpread(unit, rally);
+                // A cloaked/burrowed enemy army needs a detector nearby: the spare Overlord closer
+                // to the fight than to its spread point escorts the attack instead of sitting at home.
+                if (needsDetection && aggressive && unit->getDistance(center) < unit->getDistance(spread))
+                    SmartMove(unit, center);
+                else SmartMove(unit, spread);
+            }
         } else if (type == BWAPI::UnitTypes::Zerg_Mutalisk && raid.raiders.contains(unit)) {
             // Raiders already in the enemy mineral line finish the job instead of flying home.
             if ((!raid.target.isValid() || unit->getDistance(raid.target) > 320) && DefendBases(unit, threats)) continue;
             const bool regen = CombatPolicy::HarassNeedsRegen(unit->getHitPoints(), type.maxHitPoints(), harassRegen.count(unit->getID()) > 0);
             if (regen) harassRegen.insert(unit->getID()); else harassRegen.erase(unit->getID());
             MutaliskRaidLoop(unit, raid.target, raid.center, rally, raid.retreat || regen);
+        } else if (type == BWAPI::UnitTypes::Zerg_Scourge) {
+            if (DefendBases(unit, threats)) continue;
+            if (!aggressive) {
+                if (!AttackIfSafelyInRange(unit, 320))
+                    SmartMove(unit, threats.empty() ? ControlPoint(unit, rally) : rally);
+                continue;
+            }
+            ScourgeStrikeLoop(unit, flockCenter);
         } else if (type == BWAPI::UnitTypes::Zerg_Mutalisk || type == BWAPI::UnitTypes::Zerg_Guardian || type == BWAPI::UnitTypes::Zerg_Devourer) {
             if (DefendBases(unit, threats)) continue;
             // A containing Guardian group keeps its Devourer escort; Mutalisks stay home to defend and raid.
             const bool containing = contain && type != BWAPI::UnitTypes::Zerg_Mutalisk;
-            if (!aggressive && !containing) { SmartMove(unit, rally); continue; }
+            if (!aggressive && !containing) {
+                // Idle at rally still takes a safe free kill instead of ignoring whatever wanders by,
+                // and otherwise spreads out for map control rather than camping the whole flock at home.
+                if (!AttackIfSafelyInRange(unit, type == BWAPI::UnitTypes::Zerg_Guardian ?
+                    unit->getType().groundWeapon().maxRange() : 320))
+                    SmartMove(unit, threats.empty() ? ControlPoint(unit, rally) : rally);
+                continue;
+            }
             if (type == BWAPI::UnitTypes::Zerg_Devourer) DevourerEscortLoop(unit, flockCenter);
             else if (type == BWAPI::UnitTypes::Zerg_Guardian) {
                 // Slow and fragile: travel as one group and only split off to fight.

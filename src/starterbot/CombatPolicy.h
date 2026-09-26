@@ -45,6 +45,12 @@ namespace CombatPolicy {
     inline bool AttackLost(int armySupply, int knownEnemySupply) {
         return knownEnemySupply > 0 && armySupply * WinningRatio < knownEnemySupply;
     }
+    // A base this outmatched (or undefended) is finished off rather than pulled back once our own
+    // army count trips the attrition-based retreat fraction; only a real threat turns it around.
+    constexpr double OverwhelmRatio = 2.0;
+    inline bool Overwhelming(int armySupply, int knownEnemySupply) {
+        return knownEnemySupply <= 0 || armySupply >= knownEnemySupply * OverwhelmRatio;
+    }
     // Step back only between shots or when badly hurt, so the group keeps its damage on target.
     inline bool ShouldStepBack(Engagement engagement, bool ranged, int cooldown, int hitPoints, int maxHitPoints) {
         if (engagement == Engagement::Withdraw) return true;

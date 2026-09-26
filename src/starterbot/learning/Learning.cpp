@@ -11,20 +11,23 @@ namespace Learning {
 namespace {
     const char* compositionNames[CompositionCount] = {
         "ZerglingQueenRush", "HydraQueenRush", "MutaQueenRush", "GuardianRush", "MassMutaDevourer",
-        "LingMutaQueen", "LingMutaGuardian", "LurkerQueenMuta", "LingQueenUltra"
+        "LingMutaQueen", "LingMutaGuardian", "LurkerQueenMuta", "LingQueenUltra",
+        "HydraQueenUltra", "ScourgeQueenUltra"
     };
 
-    //                          Ling  Hydra Muta  Guard Devour Lurker Ultra
+    //                          Ling  Hydra Muta  Guard Devour Lurker Ultra Scourge
     const CompositionSpec specs[CompositionCount] = {
-        { true,  true,  {1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Zergling + Queen rush
-        { true,  true,  {0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Hydra + Queen rush
-        { true,  true,  {0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00} }, // Muta + Queen rush
-        { true,  false, {0.00, 0.00, 0.20, 0.80, 0.00, 0.00, 0.00} }, // Guardian rush (Mutas are the morph source/escort)
-        { false, false, {0.00, 0.00, 0.83, 0.00, 0.17, 0.00, 0.00} }, // Mass Muta + Devourer (5 Mutas per Devourer)
-        { false, true,  {0.50, 0.00, 0.50, 0.00, 0.00, 0.00, 0.00} }, // Ling + Muta + Queen
-        { false, false, {0.35, 0.00, 0.30, 0.35, 0.00, 0.00, 0.00} }, // Ling + Muta + Guardian
-        { false, true,  {0.00, 0.10, 0.50, 0.00, 0.00, 0.40, 0.00} }, // Lurker + Queen + Muta
-        { false, true,  {0.50, 0.00, 0.00, 0.00, 0.00, 0.00, 0.50} }, // Ling + Queen + Ultralisk
+        { true,  true,  {1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Zergling + Queen rush
+        { true,  true,  {0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Hydra + Queen rush
+        { true,  true,  {0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Muta + Queen rush
+        { true,  false, {0.00, 0.00, 0.20, 0.80, 0.00, 0.00, 0.00, 0.00} }, // Guardian rush (Mutas are the morph source/escort)
+        { false, false, {0.00, 0.00, 0.83, 0.00, 0.17, 0.00, 0.00, 0.00} }, // Mass Muta + Devourer (5 Mutas per Devourer)
+        { false, true,  {0.50, 0.00, 0.50, 0.00, 0.00, 0.00, 0.00, 0.00} }, // Ling + Muta + Queen
+        { false, false, {0.35, 0.00, 0.30, 0.35, 0.00, 0.00, 0.00, 0.00} }, // Ling + Muta + Guardian
+        { false, true,  {0.00, 0.10, 0.50, 0.00, 0.00, 0.40, 0.00, 0.00} }, // Lurker + Queen + Muta
+        { false, true,  {0.50, 0.00, 0.00, 0.00, 0.00, 0.00, 0.50, 0.00} }, // Ling + Queen + Ultralisk
+        { false, true,  {0.00, 0.55, 0.00, 0.00, 0.00, 0.00, 0.45, 0.00} }, // Hydra + Queen + Ultralisk: ranged anti-air plus tanks vs heavy air
+        { false, true,  {0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.65, 0.35} }, // Scourge + Queen + Ultralisk: cheap air snipers plus tanks vs heavy air
     };
 
     // Bias followed by one weight per Feature:
@@ -39,6 +42,8 @@ namespace {
         { 0.25, -0.4, -0.2,  0.0, -0.2,  0.3,  0.0,  0.4, -0.4,  0.0, -0.30 },
         { 0.25, -0.1,  0.0, -0.1, -0.3, -0.2,  0.7, -0.1, -0.3, -0.6, -0.20 },
         { 0.20, -0.6,  0.3,  0.2,  0.2,  0.3,  0.5,  0.1, -0.6,  0.0, -0.50 },
+        { 0.15,  0.5, -0.3, -0.3, -0.3,  0.0, -0.2, -0.2, -0.3, -0.2, -0.20 }, // Hydra/Queen/Ultra: ranged AA + tanks, weak to splash
+        { 0.10,  0.7, -0.2, -0.2, -0.6,  0.1,  0.0, -0.1,  0.3, -0.1, -0.40 }, // Scourge/Queen/Ultra: strong vs air incl. capital ships, dies to air splash
     };
 
     const GeneInfo genes[GeneCount] = {

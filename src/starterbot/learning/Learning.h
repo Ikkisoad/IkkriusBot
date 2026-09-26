@@ -23,6 +23,8 @@ namespace Learning {
         LingMutaGuardian,
         LurkerQueenMuta,
         LingQueenUltra,
+        HydraQueenUltra,
+        ScourgeQueenUltra,
         Count
     };
     constexpr int CompositionCount = static_cast<int>(Composition::Count);
@@ -30,7 +32,7 @@ namespace Learning {
     bool ParseComposition(const std::string& name, Composition& composition);
 
     // Army share targets are expressed as a fraction of army supply.
-    enum class Army { Zergling, Hydralisk, Mutalisk, Guardian, Devourer, Lurker, Ultralisk, Count };
+    enum class Army { Zergling, Hydralisk, Mutalisk, Guardian, Devourer, Lurker, Ultralisk, Scourge, Count };
     constexpr int ArmyCount = static_cast<int>(Army::Count);
 
     struct CompositionSpec {

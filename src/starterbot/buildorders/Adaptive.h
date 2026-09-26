@@ -63,6 +63,8 @@ private:
     void SetComposition(Learning::Composition composition, const std::string& reason);
 
     bool RushPending() const;
+    // The scout saw enemy combat units mass before our own defense exists: build sunkens sooner.
+    bool EarlyAggressionScouted() const;
     int Gate(Learning::Gene gene) const;
     void Opener(const Counts& counts);
     void AdvanceTech(const Counts& counts);

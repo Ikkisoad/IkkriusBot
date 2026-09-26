@@ -29,7 +29,7 @@ namespace {
     const BWAPI::UnitType armyTypes[Learning::ArmyCount] = {
         BWAPI::UnitTypes::Zerg_Zergling, BWAPI::UnitTypes::Zerg_Hydralisk, BWAPI::UnitTypes::Zerg_Mutalisk,
         BWAPI::UnitTypes::Zerg_Guardian, BWAPI::UnitTypes::Zerg_Devourer, BWAPI::UnitTypes::Zerg_Lurker,
-        BWAPI::UnitTypes::Zerg_Ultralisk
+        BWAPI::UnitTypes::Zerg_Ultralisk, BWAPI::UnitTypes::Zerg_Scourge
     };
 
     BWAPI::UnitType ArmyType(Army army) { return armyTypes[static_cast<int>(army)]; }
@@ -64,6 +64,13 @@ namespace {
         directory /= "learning";
         std::filesystem::create_directories(directory, error);
         return directory.string();
+    }
+
+    // Cloaked or burrowing attackers our army cannot fight back against without a detector nearby.
+    bool NeedsDetection(BWAPI::UnitType type) {
+        return type == BWAPI::UnitTypes::Zerg_Lurker || type == BWAPI::UnitTypes::Protoss_Dark_Templar ||
+            type == BWAPI::UnitTypes::Protoss_Arbiter || type == BWAPI::UnitTypes::Terran_Wraith ||
+            type == BWAPI::UnitTypes::Terran_Ghost;
     }
 
     bool IsStaticDefense(BWAPI::UnitType type) {
@@ -294,6 +301,20 @@ bool Adaptive::RushPending() const {
     return Learning::Spec(m_composition).rush && !m_rushLaunched;
 }
 
+// Early aggression is the strongest thing scouted against this bot: a handful of combat units
+// already out before minute four means our own static defense needs to start now, not once a
+// threat is already standing at a base.
+bool Adaptive::EarlyAggressionScouted() const {
+    if (BWAPI::Broodwar->getFrameCount() > FramesPerSecond * 60 * 4) return false;
+    int supply = 0;
+    for (const auto& [id, type] : m_enemyUnits) {
+        if (type.isWorker() || type.isBuilding() || type == BWAPI::UnitTypes::Zerg_Overlord ||
+            type == BWAPI::UnitTypes::Zerg_Larva || type == BWAPI::UnitTypes::Zerg_Egg) continue;
+        if (type.canAttack()) supply += std::max(1, type.supplyRequired());
+    }
+    return supply >= 6;
+}
+
 // Rush compositions compress every economic gate under the rush drone cap.
 int Adaptive::Gate(Gene gene) const {
     const int value = m_genome.GetInt(gene);
@@ -367,6 +388,11 @@ void Adaptive::Execute() {
                 }
             }
         }
+        // The scout saw enemy offense mass before our own army exists: get a Sunken up at the
+        // main early rather than waiting for drones or for the threat to already be at our door.
+        if (EarlyAggressionScouted() && BWAPI::Broodwar->self()->minerals() >= m_reserveMinerals + 125) {
+            if (Tools::EnsureGroundDefense(Tools::GetDepot(), 1)) m_decision = "early_defense_scouted";
+        }
         if (!emergency && Tools::BuildSurplusDefense(m_reserveMinerals)) m_decision = "surplus_defense";
     }
     ManageAttack(counts, emergency);
@@ -378,8 +404,10 @@ void Adaptive::Execute() {
     const auto constructionReserve = Tools::GetConstructionReserve();
     MatchLog::Snapshot(Learning::CompositionName(m_composition), m_decision,
         std::max(m_reserveMinerals, constructionReserve.first), std::max(m_reserveGas, constructionReserve.second));
+    bool needsDetection = false;
+    for (const auto& [id, type] : m_enemyUnits) if (NeedsDetection(type)) { needsDetection = true; break; }
     Tools::BalanceMineralWorkers();
-    Micro::HiveTechMicroLoop(myUnits);
+    Micro::HiveTechMicroLoop(myUnits, {}, needsDetection);
 }
 
 void Adaptive::Opener(const Counts& counts) {
@@ -563,7 +591,8 @@ void Adaptive::Upgrades(const Counts& counts) {
         if (self->getUpgradeLevel(upgrade) >= self->getMaxUpgradeLevel(upgrade) || self->isUpgrading(upgrade)) return;
         Tools::ResearchUpgrade(upgrade);
     };
-    const bool air = spec.Share(Army::Mutalisk) + spec.Share(Army::Guardian) + spec.Share(Army::Devourer) > 0;
+    const bool air = spec.Share(Army::Mutalisk) + spec.Share(Army::Guardian) + spec.Share(Army::Devourer) +
+        spec.Share(Army::Scourge) > 0;
     const bool melee = spec.Share(Army::Zergling) + spec.Share(Army::Ultralisk) > 0;
     const bool ranged = spec.Share(Army::Hydralisk) + spec.Share(Army::Lurker) > 0;
     if (spec.Share(Army::Zergling) > 0) research(BWAPI::UpgradeTypes::Adrenal_Glands);
@@ -631,6 +660,7 @@ void Adaptive::SpendArmyBudget(const Counts& counts) {
         HasTech(Tech::Spire, true),
         false, false, false,
         HasTech(Tech::UltraliskCavern, true),
+        Ready(BWAPI::UnitTypes::Zerg_Spawning_Pool) > 0, // Scourge needs only the pool, like Zerglings
     };
     // Larva demand: morph targets pull demand into their source unit.
     const auto demand = [&](Army kind) {
@@ -655,7 +685,7 @@ void Adaptive::SpendArmyBudget(const Counts& counts) {
         for (int a = 0; a < Learning::ArmyCount; ++a) total += army[a] * armyTypes[a].supplyRequired();
         BWAPI::UnitType choice = BWAPI::UnitTypes::None;
         double bestDeficit = -1e9;
-        for (auto source : { Army::Zergling, Army::Hydralisk, Army::Mutalisk, Army::Ultralisk }) {
+        for (auto source : { Army::Zergling, Army::Hydralisk, Army::Mutalisk, Army::Ultralisk, Army::Scourge }) {
             const auto type = ArmyType(source);
             if (!canMake[static_cast<int>(source)] || demand(source) <= 0 ||
                 minerals < type.mineralPrice() || gas < type.gasPrice()) continue;
@@ -780,7 +810,9 @@ void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
         Micro::SetMode(Micro::MicroMode::Aggressive);
         MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" + std::to_string(army) +
             " enemy=" + std::to_string(enemyArmy / 2) + (gamble ? " close_fight" : ""));
-    } else if (m_attacking && (emergency || army < threshold * m_genome.Get(Gene::RetreatFraction) ||
+    } else if (m_attacking && (emergency ||
+                               (!CombatPolicy::Overwhelming(counts.armySupply, enemyArmy) &&
+                                army < threshold * m_genome.Get(Gene::RetreatFraction)) ||
                                CombatPolicy::AttackLost(counts.armySupply, enemyArmy))) {
         m_attacking = false;
         Micro::SetMode(Micro::MicroMode::Defensive);

@@ -49,8 +49,12 @@ namespace Micro
     // HiveTech Micro
     void GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAPI::Position rally, BWAPI::Position center);
     void SmartAttackMove(BWAPI::Unit unit, BWAPI::Position position);
-    void HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave = {});
+    // `needsDetection` is set once the enemy has been scouted with cloak/burrow attackers, so a
+    // spare Overlord is pulled in to escort the attacking army instead of just spreading for vision.
+    void HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave = {}, bool needsDetection = false);
     void MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies);
+    // Scourges only carry an air weapon; they fly with the flock and suicide into the highest-value target in reach.
+    void ScourgeStrikeLoop(BWAPI::Unit scourge, BWAPI::Position escort);
     // Small-flock worker raid; `retreat` sends the raider home to regenerate or disengage.
     void MutaliskRaidLoop(BWAPI::Unit muta, BWAPI::Position raidTarget, BWAPI::Position squadCenter, BWAPI::Position home, bool retreat);
     // Siege from max range; spend weapon cooldown outside enemy anti-air reach.
