@@ -51,6 +51,9 @@ namespace Micro
     void SmartAttackMove(BWAPI::Unit unit, BWAPI::Position position);
     void HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pressureWave = {});
     void MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies);
-    void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies);
+    // Small-flock worker raid; `retreat` sends the raider home to regenerate or disengage.
+    void MutaliskRaidLoop(BWAPI::Unit muta, BWAPI::Position raidTarget, BWAPI::Position squadCenter, BWAPI::Position home, bool retreat);
+    // Siege from max range; spend weapon cooldown outside enemy anti-air reach.
+    void GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies, BWAPI::Position fallback = BWAPI::Positions::None);
     bool QueenCastLoop(BWAPI::Unit queen, BWAPI::Unitset enemies);
 }

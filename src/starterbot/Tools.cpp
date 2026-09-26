@@ -3,6 +3,8 @@
 #include <BWAPI.h>
 #include <vector>
 #include <algorithm>
+#include <limits>
+#include <map>
 #include <sstream> // Include necessary header for stringstream
 #include "micro.h"
 
@@ -94,6 +96,120 @@ void Tools::Scout(BWAPI::Unit scout) {
     }
 }
 
+namespace {
+constexpr int MineralBaseRadius = 320;
+
+bool IsUsableDepot(BWAPI::Unit unit) {
+    // A Hatchery morphing into Lair/Hive still accepts returned cargo.
+    return unit && unit->exists() && unit->getType().isResourceDepot() &&
+        (unit->isCompleted() || (unit->isMorphing() && unit->getType() != BWAPI::UnitTypes::Zerg_Hatchery));
+}
+
+BWAPI::Unitset UsableDepots() {
+    BWAPI::Unitset depots;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (IsUsableDepot(unit)) depots.insert(unit);
+    }
+    return depots;
+}
+
+BWAPI::Unit MiningTarget(BWAPI::Unit worker) {
+    const auto orderTarget = worker->getOrderTarget();
+    if (orderTarget && orderTarget->getType().isMineralField()) return orderTarget;
+    const auto commandTarget = worker->getLastCommand().getTarget();
+    if (commandTarget && commandTarget->getType().isMineralField()) return commandTarget;
+    return nullptr;
+}
+
+bool IsNearDepot(BWAPI::Unit mineral, const BWAPI::Unitset& depots) {
+    for (auto depot : depots) {
+        if (mineral->getDistance(depot) < MineralBaseRadius) return true;
+    }
+    return false;
+}
+}
+
+BWAPI::Unit Tools::GetMineralForWorker(BWAPI::Unit worker) {
+    // Only mine patches at one of our bases so return trips stay short.
+    if (!worker) return nullptr;
+    const auto depots = UsableDepots();
+    std::map<BWAPI::Unit, int> miners;
+    for (auto unit : BWAPI::Broodwar->self()->getUnits()) {
+        if (unit == worker || !unit->getType().isWorker()) continue;
+        if (const auto target = MiningTarget(unit)) ++miners[target];
+    }
+
+    BWAPI::Unit bestDepot = nullptr;
+    BWAPI::Unitset bestMinerals;
+    bool bestSaturated = true;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (auto depot : depots) {
+        BWAPI::Unitset minerals;
+        int assigned = 0;
+        for (auto mineral : BWAPI::Broodwar->getMinerals()) {
+            if (mineral->getResources() <= 0 || mineral->getDistance(depot) >= MineralBaseRadius) continue;
+            minerals.insert(mineral);
+            assigned += miners[mineral];
+        }
+        if (minerals.empty()) continue;
+        // Prefer the nearest base that still has room; walking once beats mining far away forever.
+        const bool saturated = assigned >= static_cast<int>(minerals.size()) * 2;
+        const int distance = worker->getDistance(depot);
+        if (!bestDepot || (bestSaturated && !saturated) || (saturated == bestSaturated && distance < bestDistance)) {
+            bestDepot = depot;
+            bestMinerals = minerals;
+            bestSaturated = saturated;
+            bestDistance = distance;
+        }
+    }
+
+    if (!bestDepot) {
+        // No base has minerals left: use whichever patch is closest to a depot, else the worker.
+        BWAPI::Unit fallback = nullptr;
+        int fallbackDistance = std::numeric_limits<int>::max();
+        for (auto mineral : BWAPI::Broodwar->getMinerals()) {
+            if (mineral->getResources() <= 0) continue;
+            const auto depot = GetClosestUnitTo(mineral, depots);
+            const int distance = depot ? mineral->getDistance(depot) : mineral->getDistance(worker);
+            if (distance < fallbackDistance) {
+                fallback = mineral;
+                fallbackDistance = distance;
+            }
+        }
+        return fallback;
+    }
+
+    BWAPI::Unit best = nullptr;
+    for (auto mineral : bestMinerals) {
+        if (!best || miners[mineral] < miners[best] ||
+            (miners[mineral] == miners[best] && mineral->getDistance(bestDepot) < best->getDistance(bestDepot))) best = mineral;
+    }
+    return best;
+}
+
+bool Tools::GatherNearestBaseMinerals(BWAPI::Unit worker) {
+    if (!worker || worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) return false;
+    const auto mineral = GetMineralForWorker(worker);
+    if (!mineral) return false;
+    if (MiningTarget(worker) == mineral && !worker->isIdle()) return false;
+    return worker->gather(mineral);
+}
+
+void Tools::FixLongDistanceMining() {
+    // Pull miners back from patches that are not at one of our bases (lost hatchery, strays after scouting or defending).
+    if (BWAPI::Broodwar->getFrameCount() % 24 != 12) return;
+    const auto depots = UsableDepots();
+    if (depots.empty()) return;
+    for (auto worker : BWAPI::Broodwar->self()->getUnits()) {
+        if (!worker->getType().isWorker() || !worker->isCompleted() || !worker->isGatheringMinerals() ||
+            worker->isCarryingMinerals() || HasPendingConstruction(worker)) continue;
+        const auto target = MiningTarget(worker);
+        if (!target || IsNearDepot(target, depots)) continue;
+        const auto replacement = GetMineralForWorker(worker);
+        if (replacement && replacement != target && IsNearDepot(replacement, depots)) worker->gather(replacement);
+    }
+}
+
 void Tools::GatherGas(BWAPI::Unit extractor, int targetWorkers) {
     if (!extractor || !extractor->isCompleted()) return;
     int count = 0;
@@ -107,7 +223,7 @@ void Tools::GatherGas(BWAPI::Unit extractor, int targetWorkers) {
         if (!worker->getType().isWorker() || worker->getLastCommand().getTarget() != extractor ||
             worker->isCarryingGas() || worker->isCarryingMinerals() || HasPendingConstruction(worker) ||
             worker->getLastCommandFrame() >= BWAPI::Broodwar->getFrameCount()) continue;
-        auto mineral = GetClosestUnitTo(worker, BWAPI::Broodwar->getMinerals());
+        auto mineral = GetMineralForWorker(worker);
         if (mineral && worker->gather(mineral)) --count;
     }
     for (auto worker : BWAPI::Broodwar->self()->getUnits()) {

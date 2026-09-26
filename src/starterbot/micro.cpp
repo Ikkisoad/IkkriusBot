@@ -8,6 +8,8 @@
 #include "MatchLog.h"
 #include <algorithm>
 #include <map>
+#include <set>
+#include <vector>
 
 enum MicroMode { Neutral, Aggressive, Defensive };
 int safeRange = 64;
@@ -83,9 +85,12 @@ void Micro::SmartKiteTarget(BWAPI::Unit rangedUnit, BWAPI::Unit target)
 {
     if (!rangedUnit || !target) return;
     int weaponRange = rangedUnit->getType().groundWeapon().maxRange();
-    if (rangedUnit->getDistance(target) > weaponRange)
+    const auto threatWeapon = rangedUnit->isFlying() ? target->getType().airWeapon() : target->getType().groundWeapon();
+    // Kiting only pays when we outrange the target; otherwise stand and trade.
+    if (threatWeapon == BWAPI::WeaponTypes::None || rangedUnit->getGroundWeaponCooldown() == 0 ||
+        !CombatPolicy::KiteWorthwhile(weaponRange, target->getPlayer()->weaponMaxRange(threatWeapon)))
     {
-        SmartMove(rangedUnit, target->getPosition());
+        SmartAttackUnit(rangedUnit, target);
     }
     else
     {
@@ -412,11 +417,8 @@ void Micro::sendIdleWorkersToMinerals()
         // Check the unit type, if it is an idle worker, then we want to send it somewhere
         if (unit->getType().isWorker() && unit->isIdle())
         {
-            // Get the closest mineral to this worker unit
-            BWAPI::Unit closestMineral = Tools::GetClosestUnitTo(unit, BWAPI::Broodwar->getMinerals());
-
-            // If a valid mineral was found, right click it with the unit in order to start harvesting
-            if (closestMineral) { unit->rightClick(closestMineral); }
+            // Mine at one of our bases, never at a distant patch
+            Tools::GatherNearestBaseMinerals(unit);
         }
     }
 }
@@ -424,13 +426,8 @@ void Micro::sendIdleWorkersToMinerals()
 void Micro::GatherMinerals(BWAPI::Unit unit) {  
     if (!unit) return; // Check for nullness to address C26429  
 
-    // Get the closest mineral to this worker unit  
-    BWAPI::Unit closestMineral = Tools::GetClosestUnitTo(unit, BWAPI::Broodwar->getMinerals());  
-
-    // If a valid mineral was found, right click it with the unit in order to start harvesting  
-    if (closestMineral) {  
-        unit->rightClick(closestMineral);  
-    }  
+    // Mine at one of our bases, never at a distant patch
+    Tools::GatherNearestBaseMinerals(unit);
 }
 
 void Micro::GatherResources(BWAPI::Unit unit) {
@@ -443,7 +440,8 @@ void Micro::GatherResources(BWAPI::Unit unit) {
         if (u->isCarryingGas() || u->isGatheringGas()) {
             workersOnGas++;
 		}
-        if (u->getType() == BWAPI::UnitTypes::Zerg_Extractor && u->isCompleted()) {
+        if (u->getType() == BWAPI::UnitTypes::Zerg_Extractor && u->isCompleted() &&
+            (!extractor || unit->getDistance(u) < unit->getDistance(extractor))) {
             extractor = u;
         }
 	}
@@ -454,13 +452,8 @@ void Micro::GatherResources(BWAPI::Unit unit) {
         return;
 	}
 
-    // Get the closest mineral to this worker unit  
-    BWAPI::Unit closestMineral = Tools::GetClosestUnitTo(unit, BWAPI::Broodwar->getMinerals());
-
-    // If a valid mineral was found, right click it with the unit in order to start harvesting  
-    if (closestMineral) {
-        unit->rightClick(closestMineral);
-    }
+    // Mine at one of our bases, never at a distant patch
+    Tools::GatherNearestBaseMinerals(unit);
 }
 
 void Micro::SmartGatherMinerals(BWAPI::Unit drone)
@@ -526,19 +519,8 @@ void Micro::SmartGatherMinerals(BWAPI::Unit drone)
         return;
     }
 
-    // If not holding minerals, find the closest mineral patch
-    BWAPI::Unit closestMineral = nullptr;
-    int minDist = std::numeric_limits<int>::max();
-    for (auto& mineral : BWAPI::Broodwar->getMinerals())
-    {
-        if (!mineral->exists() || mineral->getResources() <= 0) continue;
-        int dist = drone->getDistance(mineral);
-        if (dist < minDist)
-        {
-            minDist = dist;
-            closestMineral = mineral;
-        }
-    }
+    // If not holding minerals, pick a patch at one of our bases
+    BWAPI::Unit closestMineral = Tools::GetMineralForWorker(drone);
 
     if (closestMineral)
     {
@@ -998,9 +980,144 @@ namespace {
         for (auto unit : units) { x += unit->getPosition().x; y += unit->getPosition().y; }
         return BWAPI::Position(x / static_cast<int>(units.size()), y / static_cast<int>(units.size()));
     }
+
+    // Longest distance at which the enemy can hit an air unit; -1 when it cannot.
+    int AirThreatRange(BWAPI::Unit enemy) {
+        if (!enemy->isCompleted()) return -1;
+        const auto type = enemy->getType();
+        if (type == BWAPI::UnitTypes::Terran_Bunker)
+            return enemy->getPlayer()->weaponMaxRange(BWAPI::WeaponTypes::Gauss_Rifle) + 32;
+        if (type == BWAPI::UnitTypes::Protoss_Carrier) return 8 * 32; // Interceptor launch range
+        const auto weapon = type.airWeapon();
+        if (weapon == BWAPI::WeaponTypes::None) return -1;
+        return enemy->getPlayer()->weaponMaxRange(weapon);
+    }
+    bool IsStaticAntiAir(BWAPI::Unit enemy) { return enemy->getType().isBuilding() && AirThreatRange(enemy) >= 0; }
+    // Mobile threats close distance while we reposition, so give them a wider berth.
+    int ThreatMargin(BWAPI::Unit enemy) { return enemy->getType().isBuilding() ? 32 : 64; }
+
+    // Step directly away from every threat at once; flyers ignore terrain.
+    BWAPI::Position AwayFrom(BWAPI::Unit unit, const std::vector<BWAPI::Unit>& threats, BWAPI::Position fallback) {
+        double dx = 0, dy = 0;
+        for (auto threat : threats) {
+            const double x = unit->getPosition().x - threat->getPosition().x, y = unit->getPosition().y - threat->getPosition().y;
+            const double length = std::max(1.0, std::sqrt(x * x + y * y));
+            dx += x / length; dy += y / length;
+        }
+        const double length = std::sqrt(dx * dx + dy * dy);
+        if (length < 0.01) return fallback.isValid() ? fallback : unit->getPosition();
+        BWAPI::Position away(unit->getPosition().x + int(96 * dx / length), unit->getPosition().y + int(96 * dy / length));
+        away.makeValid();
+        return away;
+    }
+
+    // Mutalisk raid squad, kept stable across frames.
+    std::set<int> harassSquad, harassRegen;
+    int harassRetreatUntil = 0;
+    BWAPI::Position harassTarget = BWAPI::Positions::None;
+    std::map<int, BWAPI::Position> enemyDepots;
+    std::vector<std::pair<BWAPI::Position, int>> harassAvoid; // Defended or empty bases, until frame
+    struct RaidOrders { BWAPI::Unitset raiders; BWAPI::Position target = BWAPI::Positions::None, center = BWAPI::Positions::None; bool retreat = false; };
+
+    bool HarassAvoided(BWAPI::Position position) {
+        for (const auto& avoid : harassAvoid)
+            if (avoid.first.getApproxDistance(position) <= 320) return true;
+        return false;
+    }
+
+    void EndRaid(const std::string& reason) {
+        if (!harassSquad.empty()) MatchLog::Event("harass_end", reason);
+        harassSquad.clear(); harassRegen.clear();
+        harassTarget = BWAPI::Positions::None;
+    }
+
+    RaidOrders UpdateRaidSquad(const BWAPI::Unitset& mutalisks, const BWAPI::Unitset& reserved, BWAPI::Position home) {
+        const int frame = BWAPI::Broodwar->getFrameCount();
+        // Remember enemy depots so raids can move on once a base is cleared or defended.
+        for (auto enemy : BWAPI::Broodwar->getAllUnits()) {
+            if (enemy->exists() && enemy->isVisible() && BWAPI::Broodwar->self()->isEnemy(enemy->getPlayer()) &&
+                enemy->getType().isResourceDepot()) enemyDepots[enemy->getID()] = enemy->getPosition();
+        }
+        for (auto it = enemyDepots.begin(); it != enemyDepots.end();) {
+            const auto depot = BWAPI::Broodwar->getUnit(it->first);
+            if (BWAPI::Broodwar->isVisible(BWAPI::TilePosition(it->second)) && (!depot || !depot->exists())) it = enemyDepots.erase(it);
+            else ++it;
+        }
+        harassAvoid.erase(std::remove_if(harassAvoid.begin(), harassAvoid.end(),
+            [frame](const std::pair<BWAPI::Position, int>& avoid) { return avoid.second <= frame; }), harassAvoid.end());
+
+        std::vector<BWAPI::Unit> available;
+        for (auto muta : mutalisks) if (!reserved.contains(muta)) available.push_back(muta);
+        const int size = CombatPolicy::HarassSquadSize(static_cast<int>(available.size()), Micro::GetMode() == Micro::MicroMode::Aggressive);
+        if (size == 0) { EndRaid(Micro::GetMode() == Micro::MicroMode::Aggressive ? "main_attack" : "too_few"); return {}; }
+
+        std::set<int> alive;
+        for (auto muta : available) alive.insert(muta->getID());
+        for (auto squad : {&harassSquad, &harassRegen})
+            for (auto it = squad->begin(); it != squad->end();) it = alive.count(*it) ? std::next(it) : squad->erase(it);
+        // Top up with the healthiest free Mutalisks.
+        std::sort(available.begin(), available.end(), [](BWAPI::Unit a, BWAPI::Unit b) { return a->getHitPoints() > b->getHitPoints(); });
+        for (auto muta : available) if (static_cast<int>(harassSquad.size()) < size) harassSquad.insert(muta->getID());
+
+        RaidOrders orders;
+        BWAPI::Unitset active;
+        double power = 0;
+        for (auto muta : available) {
+            if (!harassSquad.count(muta->getID())) continue;
+            orders.raiders.insert(muta);
+            if (harassRegen.count(muta->getID())) continue;
+            active.insert(muta);
+            power += 2.0 * muta->getHitPoints() / std::max(1, muta->getType().maxHitPoints());
+        }
+        orders.center = active.empty() ? home : UnitCenter(active, home);
+
+        double antiAir = 0;
+        for (auto enemy : BWAPI::Broodwar->getUnitsInRadius(orders.center, 320, BWAPI::Filter::IsEnemy)) {
+            if (!enemy->isVisible() || AirThreatRange(enemy) < 0) continue;
+            const auto type = enemy->getType();
+            antiAir += type.isBuilding() ? CombatPolicy::StaticAntiAirPower :
+                std::max(1, type.supplyRequired()) / 2.0 * (enemy->getHitPoints() + enemy->getShields()) / std::max(1, type.maxHitPoints() + type.maxShields());
+        }
+        if (frame >= harassRetreatUntil && !active.empty() && CombatPolicy::HarassAbort(power, antiAir)) {
+            harassAvoid.push_back({harassTarget.isValid() ? harassTarget : orders.center, frame + 24 * 90});
+            harassRetreatUntil = frame + 24 * 8;
+            harassTarget = BWAPI::Positions::None;
+            MatchLog::Event("harass_abort", "power=" + std::to_string(int(power)) + " anti_air=" + std::to_string(int(antiAir)));
+        }
+        // Too many raiders regenerating: the rest wait at home instead of raiding alone.
+        orders.retreat = frame < harassRetreatUntil || static_cast<int>(active.size()) < CombatPolicy::HarassSquadMin;
+        if (orders.retreat) return orders;
+
+        // A mineral line with nobody left to kill is not worth hovering over.
+        if (harassTarget.isValid() && orders.center.getApproxDistance(harassTarget) <= 192) {
+            bool workers = false;
+            for (auto enemy : BWAPI::Broodwar->getUnitsInRadius(harassTarget, 320, BWAPI::Filter::IsEnemy))
+                workers = workers || (enemy->isVisible() && enemy->getType().isWorker());
+            if (!workers) { harassAvoid.push_back({harassTarget, frame + 24 * 45}); harassTarget = BWAPI::Positions::None; }
+        }
+        if (!harassTarget.isValid() || HarassAvoided(harassTarget)) {
+            BWAPI::Position best = BWAPI::Positions::None;
+            for (const auto& depot : enemyDepots) {
+                if (HarassAvoided(depot.second)) continue;
+                if (!best.isValid() || orders.center.getApproxDistance(depot.second) < orders.center.getApproxDistance(best)) best = depot.second;
+            }
+            const auto enemyMain = BasesTools::GetEnemyBasePosition();
+            if (!best.isValid() && enemyMain.isValid() && !HarassAvoided(enemyMain)) best = enemyMain;
+            if (best.isValid()) MatchLog::Event("harass_start", "raiders=" + std::to_string(orders.raiders.size()) +
+                " target=" + std::to_string(best.x) + "," + std::to_string(best.y));
+            harassTarget = best;
+        }
+        orders.target = harassTarget;
+        return orders;
+    }
 }
 
-void Micro::ResetCombatState() { lurkerLastContact.clear(); }
+void Micro::ResetCombatState() {
+    lurkerLastContact.clear();
+    harassSquad.clear(); harassRegen.clear(); enemyDepots.clear(); harassAvoid.clear();
+    harassRetreatUntil = 0;
+    harassTarget = BWAPI::Positions::None;
+}
 
 std::vector<BWAPI::Unitset> Micro::GetHydraGroups(const BWAPI::Unitset& units) {
     std::vector<BWAPI::Unit> unassigned;
@@ -1089,6 +1206,9 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
         else if (type == BWAPI::UnitTypes::Zerg_Devourer) devourers.insert(unit);
         if (!type.isWorker() && !type.isBuilding() && type.canAttack()) combat.insert(unit);
     }
+    // Raiders leave the main flock, so escort and regroup centers ignore them.
+    const auto raid = UpdateRaidSquad(mutalisks, pressureWave, rally);
+    for (auto raider : raid.raiders) mutalisks.erase(raider);
     const auto center = UnitCenter(combat, rally);
     // Without an air group, free Queens and Devourers follow the main army instead of idling at home.
     const auto airCenter = !guardians.empty() ? UnitCenter(guardians, rally) : UnitCenter(mutalisks, center);
@@ -1167,11 +1287,18 @@ void Micro::HiveTechMicroLoop(BWAPI::Unitset myUnits, const BWAPI::Unitset& pres
             if (danger) Flee(unit, danger);
             else if (unit == scout && !enemyBase.isValid()) ScoutAndWander(unit);
             else SmartMove(unit, unit == scout && GetMode() == MicroMode::Aggressive ? center : rally);
+        } else if (type == BWAPI::UnitTypes::Zerg_Mutalisk && raid.raiders.contains(unit)) {
+            // Raiders already in the enemy mineral line finish the job instead of flying home.
+            if ((!raid.target.isValid() || unit->getDistance(raid.target) > 320) && DefendBases(unit, threats)) continue;
+            const bool regen = CombatPolicy::HarassNeedsRegen(unit->getHitPoints(), type.maxHitPoints(), harassRegen.count(unit->getID()) > 0);
+            if (regen) harassRegen.insert(unit->getID()); else harassRegen.erase(unit->getID());
+            MutaliskRaidLoop(unit, raid.target, raid.center, rally, raid.retreat || regen);
         } else if (type == BWAPI::UnitTypes::Zerg_Mutalisk || type == BWAPI::UnitTypes::Zerg_Guardian || type == BWAPI::UnitTypes::Zerg_Devourer) {
             if (DefendBases(unit, threats)) continue;
             if (GetMode() != MicroMode::Aggressive) { SmartMove(unit, rally); continue; }
             if (type == BWAPI::UnitTypes::Zerg_Devourer) DevourerEscortLoop(unit, airCenter);
-            else if (type == BWAPI::UnitTypes::Zerg_Guardian) GuardianAssaultLoop(unit, BWAPI::Broodwar->getAllUnits());
+            else if (type == BWAPI::UnitTypes::Zerg_Guardian)
+                GuardianAssaultLoop(unit, BWAPI::Broodwar->getAllUnits(), UnitCenter(devourers.empty() ? mutalisks : devourers, rally));
             else if (unit->getDistance(UnitCenter(mutalisks, rally)) > 256 && unit->getUnitsInRadius(224, BWAPI::Filter::IsEnemy).empty())
                 SmartMove(unit, UnitCenter(mutalisks, rally));
             else MutaliskHarassLoop(unit, BWAPI::Broodwar->getAllUnits());
@@ -1195,10 +1322,10 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
     for (auto enemy : nearbyEnemies) {
         if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || !muta->canAttack(enemy)) continue;
         // Threat analysis
-        BWAPI::WeaponType w = enemy->getType().airWeapon();
-        if (w != BWAPI::WeaponTypes::None) {
+        const int threatRange = AirThreatRange(enemy);
+        if (threatRange >= 0) {
             int dist = muta->getDistance(enemy);
-            if (dist < minThreatDist && dist <= w.maxRange() + 64) {
+            if (dist < minThreatDist && dist <= threatRange + 64) {
                 minThreatDist = dist;
                 worstThreat = enemy;
             }
@@ -1212,7 +1339,9 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
     BWAPI::Unit bestTarget = ChooseFocusTarget(muta, candidates, engagement != CombatPolicy::Engagement::Commit);
 
     const int cooldown = bestTarget && bestTarget->isFlying() ? muta->getAirWeaponCooldown() : muta->getGroundWeaponCooldown();
-    if (worstThreat && (cooldown > 0 || engagement == CombatPolicy::Engagement::Withdraw)) {
+    // Only kite what we outrange; against longer range, retreating on cooldown just donates free shots.
+    const bool kiteWorthwhile = worstThreat && CombatPolicy::KiteWorthwhile(muta->getPlayer()->weaponMaxRange(muta->getType().airWeapon()), AirThreatRange(worstThreat));
+    if (worstThreat && ((cooldown > 0 && kiteWorthwhile) || engagement == CombatPolicy::Engagement::Withdraw)) {
         // Kite back toward the flock so it stays stacked
         BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Kiting!");
         FallBack(muta, worstThreat, fight.allies > 1 ? fight.allyCenter : BWAPI::Position(BasesTools::GetMainBasePosition()));
@@ -1232,42 +1361,124 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
     }
 }
 
-void Micro::GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies) {
-    if (!guardian) return;
-
-    auto nearbyEnemies = guardian->getUnitsInRadius(guardian->getType().groundWeapon().maxRange() + 64, BWAPI::Filter::IsEnemy && !BWAPI::Filter::IsFlyer);
-    
-    if (!nearbyEnemies.empty()) {
-        BWAPI::Unit bestTarget = nullptr;
-        // Prioritize static D and scary units
-        for (auto enemy : nearbyEnemies) {
-            if (!enemy->exists() || !enemy->isVisible() || !enemy->isDetected() || enemy->isFlying() || !guardian->canAttack(enemy)) continue;
-            if (!bestTarget) {
-                bestTarget = enemy;
-            } else if (enemy->getType().airWeapon().maxRange() > 0 && bestTarget->getType().airWeapon().maxRange() == 0) {
-                bestTarget = enemy;
+void Micro::MutaliskRaidLoop(BWAPI::Unit muta, BWAPI::Position raidTarget, BWAPI::Position squadCenter, BWAPI::Position home, bool retreat) {
+    if (!muta) return;
+    if (retreat) {
+        BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Raid: regroup");
+        SmartMove(muta, home);
+        return;
+    }
+    const int range = muta->getPlayer()->weaponMaxRange(muta->getType().airWeapon());
+    std::vector<BWAPI::Unit> threats, staticDefense, candidates;
+    bool outranged = false;
+    for (auto enemy : muta->getUnitsInRadius(320, BWAPI::Filter::IsEnemy)) {
+        if (!enemy->exists() || !enemy->isVisible()) continue;
+        const int threatRange = AirThreatRange(enemy);
+        if (threatRange >= 0) {
+            if (IsStaticAntiAir(enemy)) staticDefense.push_back(enemy);
+            if (muta->getDistance(enemy) <= threatRange + ThreatMargin(enemy)) {
+                threats.push_back(enemy);
+                outranged = outranged || !CombatPolicy::KiteWorthwhile(range, threatRange);
             }
         }
-        if (bestTarget && guardian->getGroundWeaponCooldown() == 0) {
-             BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Sieging");
-             SmartAttackUnit(guardian, bestTarget);
-        } else if (bestTarget) {
-             // Guardians are slow, but try to kite slightly if possible
-             int enemyRange = bestTarget->getType().airWeapon().maxRange();
-             if (enemyRange > 0 && guardian->getDistance(bestTarget) <= enemyRange) {
-                 BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Kiting");
-                 Flee(guardian, bestTarget);
-             }
+        if (enemy->isDetected() && muta->canAttack(enemy)) candidates.push_back(enemy);
+    }
+    // Workers first, then harmless units, then anything that shoots back; never under static anti-air.
+    const auto rank = [](BWAPI::Unit enemy) {
+        if (enemy->getType().isWorker()) return 0;
+        if (enemy->getType().isBuilding()) return 3;
+        return AirThreatRange(enemy) < 0 ? 1 : 2;
+    };
+    BWAPI::Unit target = nullptr;
+    for (auto enemy : candidates) {
+        bool covered = false;
+        for (auto defense : staticDefense)
+            covered = covered || (defense != enemy && defense->getDistance(enemy) <= AirThreatRange(defense) + 32);
+        if (covered) continue;
+        if (!target || rank(enemy) < rank(target) ||
+            (rank(enemy) == rank(target) && enemy->getHitPoints() + enemy->getShields() < target->getHitPoints() + target->getShields()) ||
+            (rank(enemy) == rank(target) && enemy->getHitPoints() + enemy->getShields() == target->getHitPoints() + target->getShields() &&
+             muta->getDistance(enemy) < muta->getDistance(target))) target = enemy;
+    }
+    const int cooldown = target && target->isFlying() ? muta->getAirWeaponCooldown() : muta->getGroundWeaponCooldown();
+    if (cooldown > 0 && !threats.empty() && !outranged) {
+        BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Raid: kite");
+        SmartMove(muta, AwayFrom(muta, threats, home));
+        return;
+    }
+    if (target) {
+        BWAPI::Broodwar->drawTextMap(muta->getPosition(), "Raid: attack");
+        SmartAttackUnit(muta, target);
+        return;
+    }
+    // Travel as a flock so the raid arrives with its full damage.
+    if (squadCenter.isValid() && muta->getDistance(squadCenter) > 160) { SmartMove(muta, squadCenter); return; }
+    if (raidTarget.isValid()) SmartMove(muta, raidTarget);
+    else ScoutAndWander(muta);
+}
+
+void Micro::GuardianAssaultLoop(BWAPI::Unit guardian, BWAPI::Unitset enemies, BWAPI::Position fallback) {
+    if (!guardian) return;
+    const int range = guardian->getPlayer()->weaponMaxRange(guardian->getType().groundWeapon());
+    if (!fallback.isValid()) fallback = BWAPI::Position(BasesTools::GetMainBasePosition());
+
+    std::vector<BWAPI::Unit> threats;
+    BWAPI::Unit outranger = nullptr, target = nullptr, approach = nullptr;
+    // Kill what can shoot air first, then the army, then workers, then buildings.
+    const auto rank = [](BWAPI::Unit enemy) {
+        if (AirThreatRange(enemy) >= 0) return 0;
+        if (enemy->getType().isWorker()) return 2;
+        if (enemy->getType().isBuilding()) return 3;
+        return 1;
+    };
+    for (auto enemy : guardian->getUnitsInRadius(range + 320, BWAPI::Filter::IsEnemy)) {
+        if (!enemy->exists() || !enemy->isVisible()) continue;
+        const int dist = guardian->getDistance(enemy);
+        const int threatRange = AirThreatRange(enemy);
+        if (threatRange >= 0 && dist <= threatRange + ThreatMargin(enemy)) {
+            threats.push_back(enemy);
+            if (!CombatPolicy::KiteWorthwhile(range, threatRange)) outranger = enemy;
         }
+        if (enemy->isFlying() || !enemy->isDetected() || !guardian->canAttack(enemy)) continue;
+        if (dist > range) {
+            if (!approach || dist < guardian->getDistance(approach)) approach = enemy;
+            continue;
+        }
+        if (!target || rank(enemy) < rank(target) ||
+            (rank(enemy) == rank(target) && enemy->getHitPoints() + enemy->getShields() < target->getHitPoints() + target->getShields())) target = enemy;
+    }
+
+    // Anything that matches our range makes hit-and-run a losing trade: fall back to the escort.
+    if (outranger) {
+        BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Siege: outranged");
+        SmartMove(guardian, guardian->getDistance(fallback) > 96 ? fallback : AwayFrom(guardian, threats, fallback));
+        return;
+    }
+    // Siege unit: while reloading, step out of every anti-air reach we outrange.
+    if (guardian->getGroundWeaponCooldown() > 0) {
+        if (!threats.empty()) {
+            BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Siege: reposition");
+            SmartMove(guardian, AwayFrom(guardian, threats, fallback));
+        }
+        return;
+    }
+    if (target) {
+        BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Sieging");
+        SmartAttackUnit(guardian, target);
+        return;
+    }
+    if (approach) {
+        BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Siege: approach");
+        SmartAttackUnit(guardian, approach);
+        return;
+    }
+    BWAPI::Position targetPos = BasesTools::GetEnemyBasePosition();
+    if (targetPos != BWAPI::Positions::None) {
+        BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Assaulting base");
+        SmartMove(guardian, targetPos);
     } else {
-        BWAPI::Position targetPos = BasesTools::GetEnemyBasePosition();
-        if (targetPos != BWAPI::Positions::None) {
-            BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Assaulting base");
-            SmartMove(guardian, targetPos);
-        } else {
-             BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Scouting");
-             ScoutAndWander(guardian);
-        }
+        BWAPI::Broodwar->drawTextMap(guardian->getPosition(), "Scouting");
+        ScoutAndWander(guardian);
     }
 }
 

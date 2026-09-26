@@ -38,7 +38,7 @@ void EightPool::Execute() {
                     unit->upgrade(BWAPI::UpgradeTypes::Metabolic_Boost);
                 }
                 else if (unit->getType().isWorker() && unit->isGatheringGas()) {
-					unit->gather(unit->getClosestUnit(BWAPI::Filter::IsMineralField));
+					Tools::GatherNearestBaseMinerals(unit);
                 }
 			}
         }

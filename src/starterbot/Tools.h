@@ -14,6 +14,9 @@ namespace Tools
     int CountUnitOfType(BWAPI::UnitType type);
     void Scout(BWAPI::Unit scout);
     void BalanceMineralWorkers();
+    BWAPI::Unit GetMineralForWorker(BWAPI::Unit worker);
+    bool GatherNearestBaseMinerals(BWAPI::Unit worker);
+    void FixLongDistanceMining();
     void GatherGas(BWAPI::Unit extractor, int targetWorkers = 3);
     bool BuildMacroHatchery();
     bool EnsureBaseGas(BWAPI::Unit depot);

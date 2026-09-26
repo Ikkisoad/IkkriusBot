@@ -122,6 +122,9 @@ Provides unit-level micromanagement primitives:
 | `GatherMinerals / GatherResources` | Worker assignment |
 | `unitAttack / attack` | Batch attack commands |
 | `BasicAttackAndScoutLoop` | Default frame-by-frame combat loop; leading units wait for the army |
+| `HiveTechMicroLoop` | HiveTech/MutaHive army control (Hydra groups, Queens, air units, raid squad) |
+| `MutaliskRaidLoop` | Small-flock worker harassment that avoids static anti-air |
+| `GuardianAssaultLoop` | Siege from max range; reposition out of anti-air reach during cooldown |
 | `Retreat / Flee` | Fallback movement |
 
 ### `MapTools` — [`src/starterbot/MapTools.h`](../src/starterbot/MapTools.h)

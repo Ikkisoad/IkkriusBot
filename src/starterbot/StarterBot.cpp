@@ -75,6 +75,7 @@ void StarterBot::onFrame()
     buildAdditionalSupply();
 
     currentBuildOrder->Execute();
+    Tools::FixLongDistanceMining();
 }
 
 

@@ -61,11 +61,14 @@ def summarize(path):
         "lurker_unburrows": sum(r.get("event") == "lurker_unburrow" for r in records),
         "surplus_expansions": sum(r.get("event") == "surplus_expansion" for r in records),
         "pressure_waves": sum(r.get("event") == "pressure_start" for r in records),
+        "muta_raids": sum(r.get("event") == "harass_start" for r in records),
+        "muta_raid_aborts": sum(r.get("event") == "harass_abort" for r in records),
         "last_queen_support": support[-1] if support else None,
         "sampled_failures": [{"action": a, "type": t, "reason": reason, "samples": n}
                              for (a, t, reason), n in failures.most_common(10)],
         "decisions": [{"frame": r.get("frame"), "detail": r.get("detail")}
-                      for r in records if r.get("event") in ("decision", "attack", "regroup", "pressure_start", "pressure_end", "surplus_expansion")][-20:],
+                      for r in records if r.get("event") in ("decision", "attack", "regroup", "pressure_start", "pressure_end", "surplus_expansion",
+                                                         "harass_start", "harass_abort", "harass_end")][-20:],
         "last_snapshot": snapshots[-1] if snapshots else None,
     }
 

@@ -52,4 +52,25 @@ namespace CombatPolicy {
         if (devourers < targetDevourers) return AirMorph::Devourer;
         return AirMorph::None;
     }
+
+    // Hit-and-run only pays against shorter-ranged units; against equal or longer
+    // range, backing off during cooldown just hands the enemy free shots.
+    inline bool KiteWorthwhile(int myRange, int threatRange) { return myRange > threatRange; }
+
+    // Mutalisk worker harassment: small flocks raid while the main army cannot win outright.
+    constexpr int HarassSquadMin = 3;
+    constexpr int HarassSquadMax = 6;
+    inline int HarassSquadSize(int mutalisks, bool mainAttackActive) {
+        if (mainAttackActive || mutalisks < HarassSquadMin) return 0;
+        return std::min(mutalisks, HarassSquadMax);
+    }
+    // Static anti-air is worth several Mutalisks; mobile anti-air counts by supply.
+    constexpr double StaticAntiAirPower = 6.0;
+    inline bool HarassAbort(double squadPower, double antiAirPower) {
+        return antiAirPower > squadPower * 0.75;
+    }
+    // Damaged raiders leave to regenerate and only rejoin once nearly full.
+    inline bool HarassNeedsRegen(int hp, int maxHp, bool regenerating) {
+        return regenerating ? hp * 10 < maxHp * 9 : hp * 5 < maxHp * 2;
+    }
 }

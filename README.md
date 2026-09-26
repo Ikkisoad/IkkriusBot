@@ -194,6 +194,8 @@ python tests/defense_regression.py
 python tests/micro_regression.py
 python tests/logging_regression.py
 python tests/queen_air_regression.py
+python tests/air_micro_regression.py
+python tests/mining_regression.py
 ```
 
 The build also adds macro Hatcheries when larvae limit production and lowers gas staffing
@@ -224,6 +226,23 @@ Ensnare on clusters of at least three unensnared combat units, or Spawn Broodlin
 valuable valid ground targets. Nearby Queens avoid duplicate casts. Parasite uses only
 surplus energy. Support is a production target: groups can temporarily lack a Queen
 while rebuilding losses or waiting for tech/resources.
+
+### Specialized air micro
+
+Hit-and-run is used only against units with **shorter** range. Against equal or longer
+range, backing off during weapon cooldown just gives the enemy free shots, so units
+either keep trading or disengage entirely.
+
+- **Guardians** are treated as siege units. They fire from maximum range, prioritizing
+  anything that can shoot air, and spend each weapon cooldown stepping out of the reach
+  of enemy anti-air they outrange. If an enemy matches their range (e.g. Goliaths with
+  Charon Boosters, Carriers, mobile air), they fall back to the Devourer/Mutalisk escort.
+- **Mutalisk raids**: while the main army is not attacking, a squad of 3–6 Mutalisks
+  raids enemy mineral lines. Raiders prioritize workers, skip targets covered by static
+  anti-air, travel as a flock, and send damaged members home to regenerate. The squad
+  aborts and avoids a base for a while when local anti-air outweighs it, and moves on
+  once a mineral line has no workers left. When the main attack starts, raiders rejoin
+  the flock. Logs record `harass_start`, `harass_abort` and `harass_end`.
 
 Lurkers follow nearby Hydra groups, burrow to engage ground targets, hold deployment
 through short gaps in contact and weapon cooldowns, then unburrow to rejoin the advance.
