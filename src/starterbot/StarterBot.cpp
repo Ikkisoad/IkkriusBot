@@ -126,13 +126,13 @@ void StarterBot::drawDebugInformation()
 void StarterBot::onEnd(bool isWinner)
 {
     std::string oponentName = "";
-    std::string oponentRace = "";
     for (auto player : BWAPI::Broodwar->getPlayers()) {
         if (player != BWAPI::Broodwar->self() && player != BWAPI::Broodwar->neutral()) {
             oponentName = player->getName();
-            oponentRace = player->getRace().getName();
         }
     }
+    // Random opponents stay "Unknown" in BWAPI, so record the race we actually saw.
+    const std::string oponentRace = MatchLog::EnemyRace();
     MatchLog::End(isWinner ? "win" : "loss");
     currentBuildOrder->onEnd(isWinner);
     std::cout << "We " << (isWinner ? "won!" : "lost!") << "\n";
@@ -142,6 +142,7 @@ void StarterBot::onEnd(bool isWinner)
 // Called whenever a unit is destroyed, with a pointer to the unit
 void StarterBot::onUnitDestroy(BWAPI::Unit unit)
 {
+    MatchLog::ObserveEnemy(unit);
     MatchLog::UnitEvent("destroy", unit);
     currentBuildOrder->onUnitDestroy(unit);
 }
@@ -150,6 +151,7 @@ void StarterBot::onUnitDestroy(BWAPI::Unit unit)
 // Zerg units morph when they turn into other units
 void StarterBot::onUnitMorph(BWAPI::Unit unit)
 {
+    MatchLog::ObserveEnemy(unit);
     MatchLog::UnitEvent("morph", unit);
     currentBuildOrder->onUnitMorph(unit);
 }
@@ -239,6 +241,7 @@ void StarterBot::onUnitComplete(BWAPI::Unit unit)
 // This is usually triggered when units appear from fog of war and become visible
 void StarterBot::onUnitShow(BWAPI::Unit unit)
 { 
+    MatchLog::ObserveEnemy(unit);
     if (BWAPI::Broodwar->self()->isEnemy(unit->getPlayer()) && unit->getType().isBuilding()) {
         BasesTools::SetEnemyBasePosition(unit->getPosition());
         MatchLog::UnitEvent("enemy_building_seen", unit);

@@ -181,7 +181,17 @@ python tools/analyze_match.py bin/logs/match-<id>.jsonl
 ```
 
 The summary includes floating resources, estimated supply-block duration, losses,
-production errors and the last state. Raw supply values use BWAPI's doubled units;
+production errors and the last state. The enemy race is the one BWAPI reports or, for
+Random opponents, the race of enemy units seen during the match; the win-rate CSV records the
+same resolved race instead of `Unknown`. Summarize the win-rate CSV per strategy and race
+(older `Unknown` rows are grouped by the built-in AI faction names):
+
+```powershell
+python tools/analyze_stats.py --strategy Adaptive
+python tools/analyze_stats.py --strategy Adaptive --by-opponent
+```
+
+In match summaries, raw supply values use BWAPI's doubled units;
 summary army supply uses normal game units. Logs remain local and are gitignored.
 Delete old logs manually when no longer needed.
 

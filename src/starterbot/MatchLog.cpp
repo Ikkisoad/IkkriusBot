@@ -21,6 +21,7 @@ namespace {
     int lastSnapshot = -120;
     int lastFrame = 0;
     std::string lastDecision;
+    std::string observedEnemyRace; // Random opponents report Unknown until BWAPI reveals them, so remember what we saw.
     const char* revision = "surplus-pressure-v5";
 
     std::string JsonString(const std::string& value) {
@@ -51,6 +52,7 @@ void MatchLog::Start(const std::string& strategy) {
     lastSnapshot = -120;
     lastFrame = 0;
     lastDecision.clear();
+    observedEnemyRace.clear();
     std::error_code error;
     auto directory = std::filesystem::current_path(error);
 #ifdef _WIN32
@@ -77,12 +79,20 @@ void MatchLog::Start(const std::string& strategy) {
         ",\"map\":" + JsonString(BWAPI::Broodwar->mapFileName()) +
         ",\"map_hash\":" + JsonString(BWAPI::Broodwar->mapHash()) +
         ",\"opponent\":" + JsonString(enemy ? enemy->getName() : "unknown") +
-        ",\"race\":" + JsonString(enemy ? enemy->getRace().getName() : "unknown"));
+        ",\"race\":" + JsonString(EnemyRace()));
+}
+
+std::string MatchLog::EnemyRace() {
+    if (BWAPI::BroodwarPtr && BWAPI::Broodwar->enemy()) {
+        const auto race = BWAPI::Broodwar->enemy()->getRace().getName();
+        if (race != "Unknown" && race != "Random" && race != "None") return race;
+    }
+    return observedEnemyRace.empty() ? "Unknown" : observedEnemyRace;
 }
 
 void MatchLog::End(const std::string& result) {
     if (!output.is_open()) return;
-    Write("end", ",\"result\":" + JsonString(result));
+    Write("end", ",\"result\":" + JsonString(result) + ",\"race\":" + JsonString(EnemyRace()));
     output.close();
 }
 
@@ -109,6 +119,13 @@ void MatchLog::UnitEvent(const std::string& kind, BWAPI::Unit unit) {
     Write(kind, ",\"side\":" + JsonString(ours ? "self" : "enemy") +
         ",\"id\":" + std::to_string(unit->getID()) + ",\"type\":" + JsonString(unit->getType().getName()) +
         ",\"x\":" + std::to_string(unit->getPosition().x) + ",\"y\":" + std::to_string(unit->getPosition().y));
+}
+
+void MatchLog::ObserveEnemy(BWAPI::Unit unit) {
+    if (!unit || !BWAPI::Broodwar->self()->isEnemy(unit->getPlayer())) return;
+    const auto race = unit->getType().getRace();
+    if (race == BWAPI::Races::Terran || race == BWAPI::Races::Protoss || race == BWAPI::Races::Zerg)
+        observedEnemyRace = race.getName();
 }
 
 void MatchLog::Snapshot(const std::string& phase, const std::string& decision, int reserveMinerals, int reserveGas) {
@@ -143,7 +160,7 @@ void MatchLog::Snapshot(const std::string& phase, const std::string& decision, i
     }
     std::ostringstream fields;
     fields << ",\"phase\":" << JsonString(phase) << ",\"decision\":" << JsonString(decision)
-        << ",\"race\":" << JsonString(BWAPI::Broodwar->enemy() ? BWAPI::Broodwar->enemy()->getRace().getName() : "unknown")
+        << ",\"race\":" << JsonString(EnemyRace())
         << ",\"minerals\":" << self->minerals() << ",\"gas\":" << self->gas()
         << ",\"supply_used\":" << self->supplyUsed() << ",\"supply_total\":" << self->supplyTotal()
         << ",\"supply_pending\":" << Tools::GetTotalSupply(true) - self->supplyTotal()

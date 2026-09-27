@@ -32,7 +32,7 @@ def summarize(path):
             blocked_frames += interval
         if a.get("minerals", 0) >= 800:
             float_frames += interval
-    race = snapshots[-1].get("race", start.get("race", "unknown")) if snapshots else start.get("race", "unknown")
+    race = end.get("race") or (snapshots[-1].get("race", start.get("race", "unknown")) if snapshots else start.get("race", "unknown"))
     if race.lower() == "unknown":
         observed = Counter()
         for snapshot in snapshots:

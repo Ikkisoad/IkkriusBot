@@ -58,6 +58,7 @@ void Start(const std::string&);
 void End(const std::string&);
 void Event(const std::string&,const std::string&);
 void Command(const std::string&,const std::string&,bool);
+std::string EnemyRace();
 }
 """
 main = r"""
@@ -95,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='ikkrius-log-') as temporary:
     assert first[0]['opponent']=='Opponent"\\\n'
     assert first[0]['map']=='test\\map.scx'
     assert len([r for r in first if r['event']=='command'])==3
-    assert first[-1]['result']=='loss'
+    assert first[-1]['result']=='loss' and first[-1]['race']=='Terran'
     snapshots=[r for r in first if r['event']=='snapshot']
     assert len(snapshots)==2 and snapshots[0]['reserve_minerals']==300
     assert snapshots[0]['supply_pending']==16 and snapshots[0]['visible_enemies']=={}
