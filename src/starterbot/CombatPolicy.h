@@ -19,30 +19,25 @@ namespace CombatPolicy {
         return true;
     }
 
-    // Fights are taken when clearly winnable. Close fights are declined, except for a small
-    // share of time windows where the whole army gambles on them together.
+    // Units are only traded away when the trade buys something. Fights are taken when clearly winnable;
+    // a fight we do not clearly win is taken only when it reaches the enemy's economy (workers, bases,
+    // refineries) or tech, and even then not when it is badly lost. Anything else is a waste of units.
     constexpr double WinningRatio = 1.3;    // Our power over theirs needed to commit.
-    constexpr double CloseFightRatio = 0.9; // Below this the fight is lost; withdraw.
-    constexpr int CloseFightWindowFrames = 24 * 15;
-    constexpr int CloseFightChancePercent = 15;
-    // Deterministic per window, so every unit makes the same call and the army does not split.
-    inline bool TakeCloseFight(int frame) {
-        const unsigned window = static_cast<unsigned>(std::max(0, frame) / CloseFightWindowFrames);
-        return (window * 2654435761u >> 16) % 100 < static_cast<unsigned>(CloseFightChancePercent);
-    }
+    constexpr double CloseFightRatio = 0.9; // Below this an assault already under way is dropped.
+    constexpr double PayoffRatio = 0.75;    // Below this not even economy or tech is worth the losses.
 
-    // Local fight evaluation: units commit together when the nearby group wins the trade,
-    // hit-and-run through a close fight only when gambling on it, and otherwise withdraw.
+    // Local fight evaluation: units commit together when the nearby group wins the trade, hit-and-run
+    // through a fight they do not win only when economy or tech is in reach, and otherwise withdraw.
     enum class Engagement { Commit, HitAndRun, Withdraw };
-    inline Engagement AssessEngagement(double friendlyPower, double enemyPower, bool takeCloseFight = false) {
+    inline Engagement AssessEngagement(double friendlyPower, double enemyPower, bool payoffInReach = false) {
         if (enemyPower <= 0 || friendlyPower >= enemyPower * WinningRatio) return Engagement::Commit;
-        if (takeCloseFight && friendlyPower >= enemyPower * CloseFightRatio) return Engagement::HitAndRun;
+        if (payoffInReach && friendlyPower >= enemyPower * PayoffRatio) return Engagement::HitAndRun;
         return Engagement::Withdraw;
     }
-    // Army-level attack decision on the enemy army we have scouted (both in BWAPI supply units).
-    inline bool AttackWinnable(int armySupply, int knownEnemySupply, bool takeCloseFight) {
-        if (knownEnemySupply <= 0) return true;
-        return armySupply >= knownEnemySupply * (takeCloseFight ? CloseFightRatio : WinningRatio);
+    // Army-level attack decision on the enemy army we have scouted (both in BWAPI supply units). The army
+    // only moves out on a clear edge: trades for economy or tech are made locally, where they are in reach.
+    inline bool AttackWinnable(int armySupply, int knownEnemySupply) {
+        return knownEnemySupply <= 0 || armySupply >= knownEnemySupply * WinningRatio;
     }
     // Abandon an attack once the scouted enemy army clearly outweighs ours.
     inline bool AttackLost(int armySupply, int knownEnemySupply) {

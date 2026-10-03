@@ -107,6 +107,7 @@ BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit,const BWAPI::Unitset& candidates,
     for(auto enemy:candidates) if(!best || unit->getDistance(enemy)<unit->getDistance(best)) best=enemy;
     return best;
 }
+bool IsPayoffTarget(BWAPI::Unit enemy) { return enemy->type.worker; }
 BWAPI::Unit fellBackFrom=nullptr;
 std::vector<BWAPI::Unit> covered; // Enemies sitting under static defense left to Guardians.
 bool AvoidsStaticDefense(BWAPI::Unit,BWAPI::Unit enemy) { return std::find(covered.begin(),covered.end(),enemy)!=covered.end(); }
@@ -159,21 +160,18 @@ int main() {
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==0);
     ling.idle=true;
     Micro::SmartAttackMove(&ling,{2000}); assert(ling.attacks==1);
-    // Group engagement policy: commit to winnable fights, only rarely gamble on close ones, withdraw otherwise.
+    // Group engagement policy: commit to winnable fights, trade units only for economy or tech, withdraw otherwise.
     using CombatPolicy::Engagement;
     assert(CombatPolicy::AssessEngagement(13,10)==Engagement::Commit);
-    assert(CombatPolicy::AssessEngagement(12,10)==Engagement::Withdraw); // Close: declined by default.
-    assert(CombatPolicy::AssessEngagement(12,10,true)==Engagement::HitAndRun); // ...unless gambling.
-    assert(CombatPolicy::AssessEngagement(10,12,true)==Engagement::Withdraw); // Losing fights are never gambled.
-    assert(CombatPolicy::AssessEngagement(10,17,true)==Engagement::Withdraw);
+    assert(CombatPolicy::AssessEngagement(12,10)==Engagement::Withdraw); // Close with nothing to gain: declined.
+    assert(CombatPolicy::AssessEngagement(10,12)==Engagement::Withdraw);
+    assert(CombatPolicy::AssessEngagement(12,10,true)==Engagement::HitAndRun); // Workers or tech in reach: worth it.
+    assert(CombatPolicy::AssessEngagement(8,10,true)==Engagement::HitAndRun); // ...even at a loss.
+    assert(CombatPolicy::AssessEngagement(7,10,true)==Engagement::Withdraw); // A rout is never worth it.
     assert(CombatPolicy::AssessEngagement(4,0)==Engagement::Commit);
-    int gambles=0;
-    for(int window=0;window<1000;++window) gambles+=CombatPolicy::TakeCloseFight(window*CombatPolicy::CloseFightWindowFrames);
-    assert(gambles>=80 && gambles<=220); // A low share of time windows.
-    assert(CombatPolicy::TakeCloseFight(0)==CombatPolicy::TakeCloseFight(CombatPolicy::CloseFightWindowFrames-1)); // Stable per window.
-    assert(CombatPolicy::AttackWinnable(40,0,false) && CombatPolicy::AttackWinnable(40,30,false));
-    assert(!CombatPolicy::AttackWinnable(40,35,false) && CombatPolicy::AttackWinnable(40,35,true));
-    assert(!CombatPolicy::AttackWinnable(40,50,true));
+    // The army only moves out with a clear edge; an even trade is a waste of units.
+    assert(CombatPolicy::AttackWinnable(40,0) && CombatPolicy::AttackWinnable(40,30));
+    assert(!CombatPolicy::AttackWinnable(40,35) && !CombatPolicy::AttackWinnable(40,50));
     assert(CombatPolicy::AttackLost(20,40) && !CombatPolicy::AttackLost(40,40));
     assert(!CombatPolicy::ShouldStepBack(Engagement::Commit,true,10,100,100)); // Winning groups keep shooting.
     assert(CombatPolicy::ShouldStepBack(Engagement::HitAndRun,true,10,100,100)); // Ranged units kite between shots.
@@ -190,22 +188,26 @@ int main() {
     Micro::moved={-999};
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::moved.x==-400 && Micro::fellBackFrom==nullptr); // Withdraw from losing fights.
-    // An even fight is declined, except in a gamble window where the ranged unit kites between shots.
+    // An even fight is declined, unless it reaches the enemy economy: then the ranged unit kites between shots.
     zealot.type.supply=2;
-    int gambleFrame=0, safeFrame=0;
-    while(!CombatPolicy::TakeCloseFight(gambleFrame)) gambleFrame+=CombatPolicy::CloseFightWindowFrames;
-    while(CombatPolicy::TakeCloseFight(safeFrame)) safeFrame+=CombatPolicy::CloseFightWindowFrames;
-    game.frame=safeFrame; Micro::moved={-999};
+    Micro::moved={-999};
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::moved.x==-400 && Micro::fellBackFrom==nullptr);
-    game.frame=gambleFrame;
+    FakeUnit probe{{9,1,true},&enemy,150};
+    hydra.neighbors={&hydra,&zealot,&probe};
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::fellBackFrom==&zealot);
     hydra.cooldown=0; Micro::attacked=nullptr;
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::attacked==&zealot);
+    // Losing badly is not worth it even with workers in reach.
+    zealot.type.supply=3; Micro::moved={-999}; Micro::fellBackFrom=nullptr;
+    Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
+    assert(Micro::moved.x==-400 && Micro::fellBackFrom==nullptr);
+    hydra.neighbors={&hydra,&zealot}; zealot.type.supply=2;
     game.frame=100;
     // With Guardians available, targets under static defense are left to them and the army follows the siege.
+    zealot.health=50; // A fight the group clearly wins.
     Micro::covered={&zealot}; Micro::attacked=nullptr; siegeEscort={700}; hydra.idle=true; game.frame+=1;
     Micro::GroundArmyLoop(&hydra,{}, {-400},{0});
     assert(Micro::attacked==nullptr && hydra.attackedAt.x==700);

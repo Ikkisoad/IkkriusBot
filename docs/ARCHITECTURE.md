@@ -115,7 +115,7 @@ Provides unit-level micromanagement primitives:
 | `SmartKiteTarget` | Ranged unit kiting logic |
 | `SmartFleeUntilHealed` | Melee retreat when low HP |
 | `SmartScoutMove / ScoutAndWander` | Scout movement patterns |
-| `SmartAvoidLethalAndAttackNonLethal` | Group engagement: commit, hit-and-run or withdraw, then focus fire |
+| `SmartAvoidLethalAndAttackNonLethal` | Group engagement: commit, hit-and-run (only for enemy economy or tech) or withdraw, then focus fire |
 | `AssessLocalFight` | Nearby friendly vs. enemy power and ally center (thresholds in `CombatPolicy::AssessEngagement`) |
 | `ChooseFocusTarget` | Shared target choice: threats first, then targets allies already hit, weakest, closest |
 | `FallBack` | Step away from a threat while drifting toward the group |

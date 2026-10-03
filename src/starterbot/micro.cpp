@@ -422,7 +422,16 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
 
     auto enemies = unitsInstance.GetNearbyEnemyUnits(unit, 640);
 
-    // --- Lethal building prioritization: attack at all costs ---
+    // --- Group decision: commit to winnable fights; a fight we do not clearly win is only worth the units
+    // when the enemy economy or tech is in reach, otherwise withdraw ---
+    bool payoff = false;
+    for (auto enemy : enemies)
+        if (enemy && enemy->exists() && enemy->isDetected() && unit->getDistance(enemy) <= 256 && IsPayoffTarget(enemy)) payoff = true;
+    const auto fight = AssessLocalFight(unit, 320);
+    const auto engagement = alwaysAvoid ? CombatPolicy::Engagement::Withdraw
+                                        : CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower, payoff);
+
+    // --- Lethal building prioritization: taken out when the group wins the fight, otherwise avoided ---
     BWAPI::Unit lethalBuilding = nullptr; // Declare it once at the top of the relevant scope
     int lethalBuildingDist = std::numeric_limits<int>::max();
     for (auto enemy : enemies) {
@@ -440,20 +449,20 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
             lethalBuildingDist = dist;
         }
     }
-    if (lethalBuilding) {
+    if (lethalBuilding && engagement == CombatPolicy::Engagement::Commit) {
         BWAPI::Broodwar->drawTextMap(unit->getPosition(), "Attack lethal building");
         SmartAttackUnit(unit, lethalBuilding);
         return;
     }
 	bool cantFlee = false; // Flag to indicate if fleeing is possible
-    // --- Find the closest lethal enemy in range ---
+    // --- Find the closest lethal enemy in range; when withdrawing, anything armed that can reach us ---
     BWAPI::Unit closestLethal = nullptr;
     int range = -1;
     int minLethalDist = std::numeric_limits<int>::max();
     for (auto enemy : enemies)
     {
         if (!enemy || !enemy->exists()) continue;
-        if (enemy->getType().isBuilding()) continue; // Already handled above
+        if (enemy->getType().isBuilding() && enemy != lethalBuilding) continue; // Only a lethal building we are not attacking
 
         BWAPI::WeaponType weapon = unit->getType().isFlyer() ? enemy->getType().airWeapon() : enemy->getType().groundWeapon();
         int damage = weapon.damageAmount();
@@ -462,11 +471,12 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
 
         int unitHP = unit->getHitPoints() + unit->getShields();
         bool isLethal = (damage > 0 && damage * 2 >= unitHP);
+        const bool threat = isLethal || (engagement == CombatPolicy::Engagement::Withdraw && damage > 0);
         cantFlee = range - unit->getType().groundWeapon().maxRange() > safeRange;
 
         int dist = unit->getDistance(enemy);
         const int RANGE_BUFFER = safeRange;
-        if (isLethal && dist <= range + RANGE_BUFFER) {
+        if (threat && dist <= range + RANGE_BUFFER) {
             if (dist < minLethalDist) {
                 minLethalDist = dist;
                 closestLethal = enemy;
@@ -474,11 +484,6 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
         }
     }
 
-    // --- Group decision: fight together when the local battle is winnable, hit-and-run when close ---
-    const auto fight = AssessLocalFight(unit, 320);
-    const auto engagement = alwaysAvoid ? CombatPolicy::Engagement::Withdraw
-                                        : CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower,
-                                              CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
     if (closestLethal && !cantFlee) {
         const bool ranged = unit->getType().groundWeapon().maxRange() > 32;
         const int cooldown = unit->getGroundWeaponCooldown();
@@ -498,11 +503,13 @@ void Micro::SmartAvoidLethalAndAttackNonLethal(BWAPI::Unit unit, bool alwaysAvoi
     BWAPI::Unitset candidates;
     for (auto enemy : enemies) {
         if (!enemy || !enemy->exists()) continue;
-        // While trading at even odds, don't dive past threats to chase a far-away target.
+        // While trading for economy or tech, don't dive past threats to chase a far-away target.
         if (engagement != CombatPolicy::Engagement::Commit && unit->getDistance(enemy) > 256) continue;
+        // Static defense we are not winning against is left alone.
+        if (enemy == lethalBuilding) continue;
         candidates.insert(enemy);
     }
-    BWAPI::Unit bestTarget = ChooseFocusTarget(unit, candidates, false);
+    BWAPI::Unit bestTarget = ChooseFocusTarget(unit, candidates, engagement != CombatPolicy::Engagement::Commit);
 
     if (!bestTarget) {
         // If the unit is stuck, attack the nearest enemy unit
@@ -977,8 +984,21 @@ namespace {
     }
 }
 
+// Killing these sets the enemy's economy or tech back, which is what makes losing units in a fight worth it.
+bool Micro::IsPayoffTarget(BWAPI::Unit enemy) {
+    if (!enemy || !enemy->exists()) return false;
+    const auto type = enemy->getType();
+    if (type.isWorker() || type.isResourceDepot() || type.isRefinery()) return true;
+    if (!type.isBuilding()) return false;
+    if (!type.researchesWhat().empty() || !type.upgradesWhat().empty()) return true;
+    // Tech buildings that unlock units rather than research anything themselves.
+    return type == BWAPI::UnitTypes::Terran_Factory || type == BWAPI::UnitTypes::Terran_Starport ||
+        type == BWAPI::UnitTypes::Terran_Nuclear_Silo || type == BWAPI::UnitTypes::Protoss_Robotics_Facility ||
+        type == BWAPI::UnitTypes::Protoss_Stargate;
+}
+
 // Pick a target the whole nearby group can agree on instead of each unit chasing its nearest enemy.
-BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferWorkers) {
+BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferPayoff) {
     if (!unit) return nullptr;
     BWAPI::Unit best = nullptr;
     double bestScore = std::numeric_limits<double>::max();
@@ -994,7 +1014,13 @@ BWAPI::Unit Micro::ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& can
         else if (type.isWorker()) tier = 1;
         else if (!type.isBuilding() && type != BWAPI::UnitTypes::Zerg_Larva && type != BWAPI::UnitTypes::Zerg_Egg) tier = 2;
         else if (type.isBuilding() && enemy->isCompleted()) tier = 3;
-        if (preferWorkers && tier <= 1) tier = 1 - tier;
+        // Trading units for economy or tech: spend them on workers, bases and tech, not on everything else.
+        if (preferPayoff) {
+            if (type.isWorker()) tier = 0;
+            else if (tier == 0) tier = 1;
+            else if (IsPayoffTarget(enemy)) tier = 2;
+            else tier = std::max(tier, 3);
+        }
         const int allies = AttackersOn(enemy) - (unit->getOrderTarget() == enemy ? 1 : 0);
         const int maxHp = std::max(1, type.maxHitPoints() + type.maxShields());
         const double hpFraction = double(enemy->getHitPoints() + enemy->getShields()) / maxHp;
@@ -1105,10 +1131,12 @@ void Micro::GroundArmyLoop(BWAPI::Unit unit, const BWAPI::Unitset& threats, BWAP
             candidates.insert(nearby);
         }
     }
+    // A fight we do not clearly win is only worth it with the enemy economy or tech in reach.
+    bool payoff = false;
+    for (auto candidate : candidates) payoff = payoff || IsPayoffTarget(candidate);
+    const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower, payoff);
     // Focus fire with the nearby group rather than each unit taking its nearest enemy.
-    if (!defending) target = ChooseFocusTarget(unit, candidates, false);
-    const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower,
-        CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
+    if (!defending) target = ChooseFocusTarget(unit, candidates, engagement != CombatPolicy::Engagement::Commit);
     if (!defending && engagement == CombatPolicy::Engagement::Withdraw) {
         SmartMove(unit, rally);
         return;
@@ -1202,8 +1230,11 @@ void Micro::ZerglingSquadLoop(const BWAPI::Unitset& zerglings, const BWAPI::Unit
             if (nearby->isDetected() && !nearby->isFlying()) candidates.insert(nearby);
         }
 
-        const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower, CombatPolicy::TakeCloseFight(frame));
-        // Losing the local fight (including to enemies lings cannot hit, like air): fall back to the rally.
+        bool payoff = false;
+        for (auto candidate : candidates) payoff = payoff || IsPayoffTarget(candidate);
+        const auto engagement = CombatPolicy::AssessEngagement(friendlyPower, enemyPower, payoff);
+        // Not winning the local fight (including to enemies lings cannot hit, like air) with no economy or
+        // tech to trade for: fall back to the rally.
         if (engagement == CombatPolicy::Engagement::Withdraw) {
             for (int i : available) SmartMove(lings[i], rally);
             continue;
@@ -1218,7 +1249,7 @@ void Micro::ZerglingSquadLoop(const BWAPI::Unitset& zerglings, const BWAPI::Unit
         }
         for (int i : available) {
             const auto ling = lings[i];
-            const auto target = ChooseFocusTarget(ling, candidates, false);
+            const auto target = ChooseFocusTarget(ling, candidates, engagement != CombatPolicy::Engagement::Commit);
             if (!target) { march(ling, destination()); continue; }
             if (CombatPolicy::ShouldStepBack(engagement, false, ling->getGroundWeaponCooldown(), ling->getHitPoints(),
                 ling->getType().maxHitPoints())) { FallBack(ling, target, center); continue; }
@@ -2066,8 +2097,9 @@ void Micro::MutaliskHarassLoop(BWAPI::Unit muta, BWAPI::Unitset enemies) {
 
     // Workers first while harassing, but the whole flock converges on one target.
     const auto fight = AssessLocalFight(muta, 288);
-    const auto engagement = CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower,
-        CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount()));
+    bool payoff = false;
+    for (auto candidate : candidates) payoff = payoff || IsPayoffTarget(candidate);
+    const auto engagement = CombatPolicy::AssessEngagement(fight.friendlyPower, fight.enemyPower, payoff);
     BWAPI::Unit bestTarget = ChooseFocusTarget(muta, candidates, engagement != CombatPolicy::Engagement::Commit);
 
     const int cooldown = bestTarget && bestTarget->isFlying() ? muta->getAirWeaponCooldown() : muta->getGroundWeaponCooldown();

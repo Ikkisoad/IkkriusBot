@@ -385,6 +385,13 @@ Army and economy rules in the Adaptive build:
   (at least 12 supply), without waiting for the evolved attack size. Each idle minute
   since the last attack also lowers that size by 10%, down to half. Retreats are measured
   against the army that left, not the planned size.
+- **No wasteful fights**: the army only moves out with at least 1.3x the scouted enemy army
+  (`hold_outmatched` otherwise). Only a maxed army, whose bank replaces losses right away,
+  attacks at even odds. In local fights, units commit when their group has 1.3x the nearby
+  enemy power. They take a fight they don't clearly win only when enemy workers, bases,
+  refineries or tech buildings are in reach, and not below 0.75x. Then they hit and run,
+  focusing on those targets. Otherwise they withdraw. Lethal static defense is attacked
+  only by a group that wins the fight there.
 - **Ground movement**: ground units group on their densest cluster (the main body), not
   on the average position of every unit. Only units running ahead of the body wait for
   it. Units behind it keep marching, and the army heads for the known enemy base nearest

@@ -1119,12 +1119,11 @@ void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
         CombatPolicy::PatientAttackSupply(baseThreshold, (frame - m_lastAttackEndFrame) / double(FramesPerSecond));
     const int army = counts.armySupply / 2;
     const bool maxed = BWAPI::Broodwar->self()->supplyUsed() >= 380;
-    // Attack only when the scouted enemy army is clearly beatable; a small share of time
-    // windows also accept close odds. A maxed army still refuses a clearly lost fight.
+    // Attack only when the scouted enemy army is clearly beatable: an even trade just throws units away.
+    // A maxed army, whose losses the bank rebuilds at once, also takes even odds but refuses a lost fight.
     const int enemyArmy = KnownEnemyArmySupply();
-    const bool gamble = CombatPolicy::TakeCloseFight(BWAPI::Broodwar->getFrameCount());
     const bool winnable = maxed ? !CombatPolicy::AttackLost(counts.armySupply, enemyArmy)
-                                : CombatPolicy::AttackWinnable(counts.armySupply, enemyArmy, gamble);
+                                : CombatPolicy::AttackWinnable(counts.armySupply, enemyArmy);
     bool scouted = false;
     for (const auto& [id, type] : m_enemyUnits) scouted = scouted || type.isBuilding();
     // A clear edge over everything scouted is reason enough to go, whatever the planned size.
@@ -1140,7 +1139,7 @@ void Adaptive::ManageAttack(const Counts& counts, bool emergency) {
         Micro::SetMode(Micro::MicroMode::Aggressive);
         MatchLog::Event("attack", std::string(Learning::CompositionName(m_composition)) + " army=" + std::to_string(army) +
             " enemy=" + std::to_string(enemyArmy / 2) + " threshold=" + std::to_string(threshold) +
-            (advantage && army < threshold ? " advantage" : "") + (gamble ? " close_fight" : ""));
+            (advantage && army < threshold ? " advantage" : ""));
     } else if (m_attacking) {
         // Depletion is measured against the army the attack left with, since an early attack may leave small.
         const bool depleted = !CombatPolicy::Overwhelming(counts.armySupply, enemyArmy) &&

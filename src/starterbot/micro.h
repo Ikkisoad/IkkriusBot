@@ -40,7 +40,10 @@ namespace Micro
     // Group combat helpers
     struct LocalFight { double friendlyPower = 0, enemyPower = 0; int allies = 0; BWAPI::Position allyCenter = BWAPI::Positions::None; };
     LocalFight AssessLocalFight(BWAPI::Unit unit, int radius);
-    BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferWorkers);
+    // `preferPayoff` puts the enemy economy and tech first: workers, then threats, then bases and tech buildings.
+    BWAPI::Unit ChooseFocusTarget(BWAPI::Unit unit, const BWAPI::Unitset& candidates, bool preferPayoff);
+    // Enemy economy or tech (workers, bases, refineries, tech buildings): the only things worth losing units for.
+    bool IsPayoffTarget(BWAPI::Unit enemy);
     void FallBack(BWAPI::Unit unit, BWAPI::Unit threat, BWAPI::Position anchor);
 
     void ResetCombatState();
